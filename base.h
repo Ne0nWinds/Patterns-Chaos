@@ -81,10 +81,27 @@ memory_arena CreateMemoryArena(u32 Capacity) {
 	return Result;
 }
 
-static inline void *Push(memory_arena *Arena, u32 Size) {
+static inline constexpr u32 RoundUpPowerOf2(u32 N, u32 Multiple) {
+	u32 MultipleMinusOne = Multiple - 1;
+	u32 Mask = ~MultipleMinusOne;
+	u32 Result = (N + MultipleMinusOne) & Mask;
+	return Result;
+}
+static inline constexpr u32 RoundUpPowerOf2(u64 N, u64 Multiple) {
+	u64 MultipleMinusOne = Multiple - 1LL;
+	u64 Mask = ~MultipleMinusOne;
+	u64 Result = (N + MultipleMinusOne) & Mask;
+	return Result;
+}
+
+// TODO: Chained Arenas
+static inline void *Push(memory_arena *Arena, u32 Size, u32 Alignment = 16) {
 	u8 *Result = (u8 *)Arena->Base + Arena->Offset;
-	Assert(Arena->Offset + Size < Arena->Capacity);
-	Arena->Offset += Size;
+
+	u32 AlignedOffset = RoundUpPowerOf2(Arena->Offset, Alignment);
+	Assert(AlignedOffset + Size <= Arena->Capacity);
+	Arena->Offset = AlignedOffset + Size;
+
 	for (u32 i = 0; i < Size; ++i) {
 		Result[i] = 0;
 	}
@@ -141,3 +158,5 @@ struct range {
 };
 
 #define CreateRange(Array) { Array, ArrayLen(Array) }
+
+static memory_arena Temp;

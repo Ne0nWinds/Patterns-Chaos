@@ -19,15 +19,12 @@ static VkFence InFlightFences[FramesInFlight];
 
 static VkPipeline Pipeline;
 static VkSurfaceKHR Surface;
-static VkSwapchainKHR Swapchain;
+static VkSwapchainKHR Swapchain = 0;
 static GLFWwindow *Window = 0;
-static int WindowWidth = 0, WindowHeight = 0;
+static int WindowWidth = 1280, WindowHeight = 1280;
 
 static u32 QueueFamilyIndex = -1;
 static VkImage SwapchainImages[MaxSwapchainImageCount];
-
-static VkDeviceMemory CPUVisibleMemory;
-static VkDeviceMemory GPULocalMemory;
 
 static VkCommandPool CommandPool;
 static VkCommandBuffer CommandBuffers[FramesInFlight];
@@ -47,9 +44,9 @@ static u32 BlitComputeShaderBytes[] =
 	#include "blit.compute.h"
 ;
 
-
-#define OnExitPush(Callback) {\
-	PushCleanUpTask(&VulkanCleanupStack, Callback);\
+#define OnExitPush(...) {\
+	static auto Task = [](){ __VA_ARGS__; };\
+	PushCleanUpTask(&VulkanCleanupStack, Task);\
 }
 
 [[noreturn]]
@@ -64,6 +61,7 @@ static void ExitApp(u32 ErrorCode);
 }
 
 #include "vulkan_helpers.h"
+#include "vulkan_allocator.h"
 
 [[noreturn]]
 static void ExitApp(u32 ErrorCode) {
@@ -73,10 +71,50 @@ static void ExitApp(u32 ErrorCode) {
 	exit(ErrorCode);
 }
 
-static memory_arena Temp;
+static inline s32 S32_Max(s32 A, s32 B) {
+	return (A > B) ? A : B;
+}
+static inline s32 S32_Min(s32 A, s32 B) {
+	return (A > B) ? A : B;
+}
+static inline s32 S32_Clamp(s32 A, s32 Min, s32 Max) {
+	return S32_Min(S32_Max(A, Min), Max);
+}
+
+static memory_arena CPURenderData;
+static vulkan_arena GPULocalArena;
+static vulkan_arena GPUVisibleArena;
+
+static u64 UniformBufferOffset;
+
+static void CreateSwapchain() {
+	glfwGetFramebufferSize(Window, &WindowWidth, &WindowHeight);
+
+	{
+		v2i *UniformData;
+		vkMapMemory(Device, GPUVisibleArena.Memory, 0, sizeof(v2i), 0, (void **)&UniformData);
+		UniformData->X = WindowWidth;
+		UniformData->Y = WindowHeight;
+		vkUnmapMemory(Device, GPUVisibleArena.Memory);
+	}
+
+	VkSurfaceCapabilitiesKHR Capabilities = {};
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &Capabilities);
+
+	s32 Width = S32_Clamp(WindowWidth, Capabilities.minImageExtent.width, Capabilities.maxImageExtent.width);
+	s32 Height = S32_Clamp(WindowHeight, Capabilities.minImageExtent.height, Capabilities.maxImageExtent.height);
+
+	vk_format_and_color FormatAndColor = VulkanGetBestAvailableFormatAndColor(PhysicalDevice, Surface);
+	Swapchain = VulkanCreateSwapchain(Device, Surface, FormatAndColor, { WindowWidth, WindowHeight }, Swapchain);
+
+	vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, NULL);
+	RuntimeAssert(SwapchainImageCount <= MaxSwapchainImageCount && SwapchainImageCount > 0);
+	RuntimeAssert(vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, SwapchainImages) == VK_SUCCESS);
+}
 
 s32 main() {
-	Temp = CreateMemoryArena(MB(256));
+	Temp = CreateMemoryArena(MB(32));
+	CPURenderData = CreateMemoryArena(MB(64));
 
 	// Init
 	{
@@ -100,9 +138,7 @@ s32 main() {
 		CreateInfo.ppEnabledExtensionNames = GLFWExtensions;
 
 		RuntimeAssert(vkCreateInstance(&CreateInfo, NULL, &Instance) == VK_SUCCESS);
-		OnExitPush([](){
-			vkDestroyInstance(Instance, NULL);
-		});
+		OnExitPush(vkDestroyInstance(Instance, NULL));
 
 		{
 			u32 DeviceCount = 0;
@@ -165,69 +201,24 @@ s32 main() {
 			DeviceCreateInfo.ppEnabledExtensionNames = DeviceExtensions;
 
 			RuntimeAssert(vkCreateDevice(PhysicalDevice, &DeviceCreateInfo, NULL, &Device) == VK_SUCCESS);
-			OnExitPush([](){
-				vkDestroyDevice(Device, NULL);
-			});
+			OnExitPush(vkDestroyDevice(Device, NULL));
 
 			vkGetDeviceQueue(Device, QueueFamilyIndex, 0, &Queue);
 		}
 
 		{
 			glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-			Window = glfwCreateWindow(1280, 1280, "Primordial Particle System", NULL, NULL);
+			Window = glfwCreateWindow(WindowWidth, WindowHeight, "Primordial Particle System", NULL, NULL);
 			RuntimeAssert(Window);
 
 			glfwCreateWindowSurface(Instance, Window, NULL, &Surface);
 			RuntimeAssert(Surface);
 
-			OnExitPush([](){
+			OnExitPush({
 				vkDestroySurfaceKHR(Instance, Surface, NULL);
 				glfwDestroyWindow(Window);
 			});
 
-		}
-
-		{
-			u32 SurfaceFormatCount = 0;
-			vkGetPhysicalDeviceSurfaceFormatsKHR(PhysicalDevice, Surface, &SurfaceFormatCount, NULL);
-			VkSurfaceFormatKHR *SurfaceFormats = PushStruct(&Temp, VkSurfaceFormatKHR, SurfaceFormatCount);
-			vkGetPhysicalDeviceSurfaceFormatsKHR(PhysicalDevice, Surface, &SurfaceFormatCount, SurfaceFormats);
-
-			VkFormat Format = SurfaceFormats[0].format;
-			VkColorSpaceKHR ColorSpace = SurfaceFormats[0].colorSpace;
-			for (u32 i = 1; i < SurfaceFormatCount; ++i) {
-				VkSurfaceFormatKHR SurfaceFormat = SurfaceFormats[i];
-				if (SurfaceFormat.format == VK_FORMAT_B8G8R8A8_SRGB &&
-					SurfaceFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-					Format = SurfaceFormat.format;
-					ColorSpace = SurfaceFormat.colorSpace;
-					break;
-				}
-			}
-
-			glfwGetFramebufferSize(Window, &WindowWidth, &WindowHeight);
-
-			VkSwapchainCreateInfoKHR CreateInfo = {
-				.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-				.surface = Surface,
-				.minImageCount = FramesInFlight,
-				.imageFormat = Format,
-				.imageColorSpace = ColorSpace,
-				.imageExtent = { (u32)WindowWidth, (u32)WindowHeight },
-				.imageArrayLayers = 1,
-				.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-				.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-				.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-				.presentMode = VK_PRESENT_MODE_FIFO_KHR,
-				.clipped = VK_TRUE
-			};
-			vkCreateSwapchainKHR(Device, &CreateInfo, NULL, &Swapchain);
-			OnExitPush([](){ vkDestroySwapchainKHR(Device, Swapchain, NULL); });
-
-			vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, NULL);
-			RuntimeAssert(SwapchainImageCount <= MaxSwapchainImageCount && SwapchainImageCount > 0);
-			RuntimeAssert(vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, SwapchainImages) == VK_SUCCESS);
 		}
 
 		// Blit Compute Shader
@@ -258,7 +249,7 @@ s32 main() {
 				.pBindings = Bindings
 			};
 			RuntimeAssert(vkCreateDescriptorSetLayout(Device, &LayoutInfo, NULL, &BlitDescriptorSetLayout) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyDescriptorSetLayout(Device, BlitDescriptorSetLayout, NULL); });
+			OnExitPush(vkDestroyDescriptorSetLayout(Device, BlitDescriptorSetLayout, NULL));
 
 			VkDescriptorPoolSize PoolSizes[2] = {
 				{
@@ -276,7 +267,7 @@ s32 main() {
 			PoolInfo.pPoolSizes = PoolSizes;
 			PoolInfo.maxSets = 1;
 			RuntimeAssert(vkCreateDescriptorPool(Device, &PoolInfo, NULL, &DescriptorPool) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyDescriptorPool(Device, DescriptorPool, NULL); });
+			OnExitPush(vkDestroyDescriptorPool(Device, DescriptorPool, NULL));
 
 			VkDescriptorSetAllocateInfo DescriptorSetAllocInfo = {};
 			DescriptorSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -302,7 +293,7 @@ s32 main() {
 				.pSetLayouts = &BlitDescriptorSetLayout
 			};
 			RuntimeAssert(vkCreatePipelineLayout(Device, &PipelineLayoutInfo, NULL, &BlitPipelineLayout) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyPipelineLayout(Device, BlitPipelineLayout, NULL); });
+			OnExitPush(vkDestroyPipelineLayout(Device, BlitPipelineLayout, NULL));
 
 			VkPipelineShaderStageCreateInfo ShaderStageCreateInfo = {
 				.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -316,10 +307,11 @@ s32 main() {
 				.layout = BlitPipelineLayout
 			};
 			RuntimeAssert(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineCreateInfo, NULL, &BlitPipeline) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyPipeline(Device, BlitPipeline, NULL); });
+			OnExitPush(vkDestroyPipeline(Device, BlitPipeline, NULL));
 
 			RuntimeAssert(Succeeded);
 
+#if 0
 			VkBufferCreateInfo BufferCreateInfo = {
 				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
 				.size = sizeof(v2i),
@@ -327,24 +319,7 @@ s32 main() {
 				.sharingMode = VK_SHARING_MODE_EXCLUSIVE
 			};
 			RuntimeAssert(vkCreateBuffer(Device, &BufferCreateInfo, NULL, &BlitUniformBuffer) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyBuffer(Device, BlitUniformBuffer, NULL); });
-
-			VkImageCreateInfo ImageCreateInfo = {};
-			ImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-			ImageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-			ImageCreateInfo.extent.width = (u32)WindowWidth;
-			ImageCreateInfo.extent.height = (u32)WindowHeight;
-			ImageCreateInfo.extent.depth = 1;
-			ImageCreateInfo.mipLevels = 1;
-			ImageCreateInfo.arrayLayers = 1;
-			ImageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-			ImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-			ImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-			ImageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-			ImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-			ImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			RuntimeAssert(vkCreateImage(Device, &ImageCreateInfo, NULL, &BlitOutputImage) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyImage(Device, BlitOutputImage, NULL); });
+			OnExitPush(vkDestroyBuffer(Device, BlitUniformBuffer, NULL));
 
 			VkPhysicalDeviceMemoryProperties MemoryProperties;
 			vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
@@ -357,7 +332,7 @@ s32 main() {
 			AllocateInfo.allocationSize = UniformBufferRequirements.size;
 			AllocateInfo.memoryTypeIndex = FindMemoryType(UniformBufferRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, MemoryProperties);
 			RuntimeAssert(vkAllocateMemory(Device, &AllocateInfo, NULL, &CPUVisibleMemory) == VK_SUCCESS);
-			OnExitPush([](){ vkFreeMemory(Device, CPUVisibleMemory, NULL); });
+			OnExitPush(vkFreeMemory(Device, CPUVisibleMemory, NULL));
 
 			RuntimeAssert(vkBindBufferMemory(Device, BlitUniformBuffer, CPUVisibleMemory, 0) == VK_SUCCESS);
 
@@ -369,30 +344,39 @@ s32 main() {
 			AllocateInfo.allocationSize = ImageRequirements.size;
 			AllocateInfo.memoryTypeIndex = FindMemoryType(ImageRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, MemoryProperties);
 			RuntimeAssert(vkAllocateMemory(Device, &AllocateInfo, NULL, &GPULocalMemory) == VK_SUCCESS);
-			OnExitPush([](){ vkFreeMemory(Device, GPULocalMemory, NULL); });
+			OnExitPush(vkFreeMemory(Device, GPULocalMemory, NULL));
 
 			RuntimeAssert(vkBindImageMemory(Device, BlitOutputImage, GPULocalMemory, 0) == VK_SUCCESS);
+#endif 
+			VkPhysicalDeviceMemoryProperties DeviceProperties;
+			vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &DeviceProperties);
+
+			const VkFormat ImageFormat = VK_FORMAT_R8G8B8A8_UNORM;
+
+			{
+				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
+				BlitOutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+				GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
+			}
+			{
+				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
+				BlitUniformBuffer = ArenaBuilder.PushBuffer(sizeof(v2i), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, &UniformBufferOffset);
+				GPUVisibleArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, DeviceProperties);
+			}
+
 
 			VkImageViewCreateInfo ImageViewCreateInfo = {};
 			ImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 			ImageViewCreateInfo.image = BlitOutputImage;
 			ImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			ImageViewCreateInfo.format = ImageCreateInfo.format;
+			ImageViewCreateInfo.format = ImageFormat;
 			ImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			ImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
 			ImageViewCreateInfo.subresourceRange.levelCount = 1;
 			ImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
 			ImageViewCreateInfo.subresourceRange.layerCount = 1;
 			RuntimeAssert(vkCreateImageView(Device, &ImageViewCreateInfo, NULL, &BlitOutputImageView) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyImageView(Device, BlitOutputImageView, NULL); });
-		}
-
-		{
-			v2i *UniformData;
-			vkMapMemory(Device, CPUVisibleMemory, 0, sizeof(v2i), 0, (void **)&UniformData);
-			UniformData->X = WindowWidth;
-			UniformData->Y = WindowHeight;
-			vkUnmapMemory(Device, CPUVisibleMemory);
+			OnExitPush(vkDestroyImageView(Device, BlitOutputImageView, NULL));
 		}
 
 		{
@@ -430,6 +414,9 @@ s32 main() {
 			vkUpdateDescriptorSets(Device, ArrayLen(DescriptorWrites), DescriptorWrites, 0, NULL);
 		}
 
+		CreateSwapchain();
+		OnExitPush(vkDestroySwapchainKHR(Device, Swapchain, NULL));
+
 		{
 			VkCommandPoolCreateInfo CommandPoolCreateInfo = {
 				.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -437,10 +424,10 @@ s32 main() {
 				.queueFamilyIndex = QueueFamilyIndex
 			};
 			RuntimeAssert(vkCreateCommandPool(Device, &CommandPoolCreateInfo, NULL, &CommandPool) == VK_SUCCESS);
-			OnExitPush([](){ vkDestroyCommandPool(Device, CommandPool, NULL); });
+			OnExitPush(vkDestroyCommandPool(Device, CommandPool, NULL));
 
 			VulkanAllocateCommandBuffers(Device, CommandPool, CreateRange(CommandBuffers));
-			OnExitPush([](){ vkFreeCommandBuffers(Device, CommandPool, ArrayLen(CommandBuffers), CommandBuffers); });
+			OnExitPush(vkFreeCommandBuffers(Device, CommandPool, ArrayLen(CommandBuffers), CommandBuffers));
 		}
 
 		{
@@ -465,14 +452,13 @@ s32 main() {
 	}
 
 	{
-		bool Succeeded = true;
 		for (u32 i = 0; i < FramesInFlight; ++i) {
 			ImageAvailableSemaphores[i] = VulkanCreateSemaphore(Device);
 			RenderFinishedSemaphores[i] = VulkanCreateSemaphore(Device);
 			InFlightFences[i] = VulkanCreateFence(Device, true);
 		}
 
-		OnExitPush([](){
+		OnExitPush({
 			for (u32 i = 0; i < FramesInFlight; ++i) {
 				vkDestroySemaphore(Device, ImageAvailableSemaphores[i], NULL);
 				vkDestroySemaphore(Device, RenderFinishedSemaphores[i], NULL);
@@ -489,8 +475,8 @@ s32 main() {
 
 		RuntimeAssert(vkWaitForFences(Device, 1, InFlightFences + CurrentFrame, VK_TRUE, UINT64_MAX) == VK_SUCCESS);
 		vkResetFences(Device, 1, InFlightFences + CurrentFrame);
-		RuntimeAssert(vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX, ImageAvailableSemaphores[CurrentFrame], VK_NULL_HANDLE, &ImageIndex) == VK_SUCCESS);
 
+		VkResult AcquireImageResult = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX, ImageAvailableSemaphores[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
 		VkCommandBuffer CommandBuffer = CommandBuffers[CurrentFrame];
 
 		{
@@ -541,7 +527,16 @@ s32 main() {
 		PresentInfo.swapchainCount = 1;
 		PresentInfo.pSwapchains = &Swapchain;
 		PresentInfo.pImageIndices = &ImageIndex;
-		RuntimeAssert(vkQueuePresentKHR(Queue, &PresentInfo) == VK_SUCCESS);
+
+		vkQueuePresentKHR(Queue, &PresentInfo);
+
+		if (AcquireImageResult == VK_ERROR_OUT_OF_DATE_KHR || AcquireImageResult == VK_SUBOPTIMAL_KHR) {
+			vkDeviceWaitIdle(Device);
+			CreateSwapchain();
+			CurrentFrame = 0;
+		} else {
+			RuntimeAssert(AcquireImageResult == VK_SUCCESS);
+		}
 
 		CurrentFrame += 1;
 		CurrentFrame %= FramesInFlight;
