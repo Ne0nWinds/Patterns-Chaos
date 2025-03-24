@@ -87,6 +87,41 @@ static vulkan_arena GPUVisibleArena;
 
 static u64 UniformBufferOffset;
 
+static void UpdateDescriptorSets() {
+	VkDescriptorBufferInfo BufferInfo = {};
+	BufferInfo.buffer = BlitUniformBuffer;
+	BufferInfo.offset = 0;
+	BufferInfo.range = sizeof(v2i);
+
+	VkDescriptorImageInfo ImageInfo = {};
+	ImageInfo.imageView = BlitOutputImageView;
+	ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+	VkWriteDescriptorSet UniformBufferUpdate = {};
+	UniformBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	UniformBufferUpdate.dstSet = BlitDescriptorSet;
+	UniformBufferUpdate.dstBinding = 1;
+	UniformBufferUpdate.dstArrayElement = 0;
+	UniformBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	UniformBufferUpdate.descriptorCount = 1;
+	UniformBufferUpdate.pBufferInfo = &BufferInfo;
+
+	VkWriteDescriptorSet ImageUpdate = {};
+	ImageUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	ImageUpdate.dstSet = BlitDescriptorSet;
+	ImageUpdate.dstBinding = 0;
+	ImageUpdate.dstArrayElement = 0;
+	ImageUpdate.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	ImageUpdate.descriptorCount = 1;
+	ImageUpdate.pImageInfo = &ImageInfo;
+
+	VkWriteDescriptorSet DescriptorWrites[] = {
+		UniformBufferUpdate,
+		ImageUpdate,
+	};
+	vkUpdateDescriptorSets(Device, ArrayLen(DescriptorWrites), DescriptorWrites, 0, NULL);
+}
+
 static void CreateSwapchain() {
 	glfwGetFramebufferSize(Window, &WindowWidth, &WindowHeight);
 
@@ -105,11 +140,59 @@ static void CreateSwapchain() {
 	s32 Height = S32_Clamp(WindowHeight, Capabilities.minImageExtent.height, Capabilities.maxImageExtent.height);
 
 	vk_format_and_color FormatAndColor = VulkanGetBestAvailableFormatAndColor(PhysicalDevice, Surface);
-	Swapchain = VulkanCreateSwapchain(Device, Surface, FormatAndColor, { WindowWidth, WindowHeight }, Swapchain);
+	vkDestroySwapchainKHR(Device, Swapchain, NULL);
+	Swapchain = VulkanCreateSwapchain(Device, Surface, FormatAndColor, { WindowWidth, WindowHeight });
 
 	vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, NULL);
 	RuntimeAssert(SwapchainImageCount <= MaxSwapchainImageCount && SwapchainImageCount > 0);
 	RuntimeAssert(vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, SwapchainImages) == VK_SUCCESS);
+
+	GPULocalArena.Destroy(Device);
+	Reset(&CPURenderData);
+
+	vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
+	const VkFormat ImageFormat = VK_FORMAT_R8G8B8A8_UNORM;
+	BlitOutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+	VkPhysicalDeviceMemoryProperties DeviceProperties;
+	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &DeviceProperties);
+	GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
+	
+
+	if (BlitOutputImageView) {
+		vkDestroyImageView(Device, BlitOutputImageView, NULL);
+	}
+
+	VkImageViewCreateInfo ImageViewCreateInfo = {};
+	ImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	ImageViewCreateInfo.image = BlitOutputImage;
+	ImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	ImageViewCreateInfo.format = ImageFormat;
+	ImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	ImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+	ImageViewCreateInfo.subresourceRange.levelCount = 1;
+	ImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+	ImageViewCreateInfo.subresourceRange.layerCount = 1;
+	RuntimeAssert(vkCreateImageView(Device, &ImageViewCreateInfo, NULL, &BlitOutputImageView) == VK_SUCCESS);
+
+	UpdateDescriptorSets();
+
+	{
+		VkCommandBuffer TempCMD = VulkanBeginSingleTimeCommands(Device, CommandPool);
+
+		CmdTransitionImageLayout(TempCMD, BlitOutputImage,
+			{ VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 },
+			{ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT  }
+		);
+
+		for (u32 i = 0; i < SwapchainImageCount; ++i) {
+			CmdTransitionImageLayout(TempCMD, SwapchainImages[i],
+				{ VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 },
+				{ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0 }
+			);
+		}
+
+		VulkanEndSingleTimeCommands(Device, CommandPool, Queue, TempCMD);
+	}
 }
 
 s32 main() {
@@ -355,7 +438,7 @@ s32 main() {
 
 			{
 				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
-				BlitOutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+				BlitOutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 				GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
 			}
 			{
@@ -363,59 +446,16 @@ s32 main() {
 				BlitUniformBuffer = ArenaBuilder.PushBuffer(sizeof(v2i), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, &UniformBufferOffset);
 				GPUVisibleArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, DeviceProperties);
 			}
+			OnExitPush({
+				GPULocalArena.Destroy(Device);
+				GPUVisibleArena.Destroy(Device);
+			});
 
-
-			VkImageViewCreateInfo ImageViewCreateInfo = {};
-			ImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-			ImageViewCreateInfo.image = BlitOutputImage;
-			ImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			ImageViewCreateInfo.format = ImageFormat;
-			ImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-			ImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
-			ImageViewCreateInfo.subresourceRange.levelCount = 1;
-			ImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
-			ImageViewCreateInfo.subresourceRange.layerCount = 1;
-			RuntimeAssert(vkCreateImageView(Device, &ImageViewCreateInfo, NULL, &BlitOutputImageView) == VK_SUCCESS);
-			OnExitPush(vkDestroyImageView(Device, BlitOutputImageView, NULL));
 		}
 
 		{
-			VkDescriptorBufferInfo BufferInfo = {};
-			BufferInfo.buffer = BlitUniformBuffer;
-			BufferInfo.offset = 0;
-			BufferInfo.range = sizeof(v2i);
-
-			VkDescriptorImageInfo ImageInfo = {};
-			ImageInfo.imageView = BlitOutputImageView;
-			ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-			VkWriteDescriptorSet UniformBufferUpdate = {};
-			UniformBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			UniformBufferUpdate.dstSet = BlitDescriptorSet;
-			UniformBufferUpdate.dstBinding = 1;
-			UniformBufferUpdate.dstArrayElement = 0;
-			UniformBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			UniformBufferUpdate.descriptorCount = 1;
-			UniformBufferUpdate.pBufferInfo = &BufferInfo;
-
-			VkWriteDescriptorSet ImageUpdate = {};
-			ImageUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			ImageUpdate.dstSet = BlitDescriptorSet;
-			ImageUpdate.dstBinding = 0;
-			ImageUpdate.dstArrayElement = 0;
-			ImageUpdate.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-			ImageUpdate.descriptorCount = 1;
-			ImageUpdate.pImageInfo = &ImageInfo;
-
-			VkWriteDescriptorSet DescriptorWrites[] = {
-				UniformBufferUpdate,
-				ImageUpdate,
-			};
-			vkUpdateDescriptorSets(Device, ArrayLen(DescriptorWrites), DescriptorWrites, 0, NULL);
 		}
 
-		CreateSwapchain();
-		OnExitPush(vkDestroySwapchainKHR(Device, Swapchain, NULL));
 
 		{
 			VkCommandPoolCreateInfo CommandPoolCreateInfo = {
@@ -430,23 +470,9 @@ s32 main() {
 			OnExitPush(vkFreeCommandBuffers(Device, CommandPool, ArrayLen(CommandBuffers), CommandBuffers));
 		}
 
-		{
-			VkCommandBuffer TempCMD = VulkanBeginSingleTimeCommands(Device, CommandPool);
-
-			CmdTransitionImageLayout(TempCMD, BlitOutputImage,
-				{ VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 },
-				{ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT  }
-			);
-
-			for (u32 i = 0; i < SwapchainImageCount; ++i) {
-				CmdTransitionImageLayout(TempCMD, SwapchainImages[i],
-					{ VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 },
-					{ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0 }
-				);
-			}
-
-			VulkanEndSingleTimeCommands(Device, CommandPool, Queue, TempCMD);
-		}
+		CreateSwapchain();
+		OnExitPush(vkDestroySwapchainKHR(Device, Swapchain, NULL));
+		OnExitPush(vkDestroyImageView(Device, BlitOutputImageView, NULL));
 
 		Reset(&Temp);
 	}
@@ -474,11 +500,20 @@ s32 main() {
 		glfwPollEvents();
 
 		RuntimeAssert(vkWaitForFences(Device, 1, InFlightFences + CurrentFrame, VK_TRUE, UINT64_MAX) == VK_SUCCESS);
-		vkResetFences(Device, 1, InFlightFences + CurrentFrame);
 
 		VkResult AcquireImageResult = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX, ImageAvailableSemaphores[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
-		VkCommandBuffer CommandBuffer = CommandBuffers[CurrentFrame];
 
+		if (AcquireImageResult == VK_ERROR_OUT_OF_DATE_KHR || AcquireImageResult == VK_SUBOPTIMAL_KHR) {
+			vkDeviceWaitIdle(Device);
+			CreateSwapchain();
+			continue;
+		} else {
+			RuntimeAssert(AcquireImageResult == VK_SUCCESS);
+		}
+
+		vkResetFences(Device, 1, InFlightFences + CurrentFrame);
+
+		VkCommandBuffer CommandBuffer = CommandBuffers[CurrentFrame];
 		{
 			vkResetCommandBuffer(CommandBuffer, 0);
 			VulkanBeginCommands(CommandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
@@ -528,14 +563,11 @@ s32 main() {
 		PresentInfo.pSwapchains = &Swapchain;
 		PresentInfo.pImageIndices = &ImageIndex;
 
-		vkQueuePresentKHR(Queue, &PresentInfo);
-
-		if (AcquireImageResult == VK_ERROR_OUT_OF_DATE_KHR || AcquireImageResult == VK_SUBOPTIMAL_KHR) {
+		VkResult PresentResult = vkQueuePresentKHR(Queue, &PresentInfo);
+		if (PresentResult == VK_ERROR_OUT_OF_DATE_KHR || PresentResult == VK_SUBOPTIMAL_KHR) {
 			vkDeviceWaitIdle(Device);
 			CreateSwapchain();
-			CurrentFrame = 0;
-		} else {
-			RuntimeAssert(AcquireImageResult == VK_SUCCESS);
+			continue;
 		}
 
 		CurrentFrame += 1;

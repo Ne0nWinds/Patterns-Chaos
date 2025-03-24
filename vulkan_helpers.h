@@ -188,7 +188,7 @@ static vk_format_and_color VulkanGetBestAvailableFormatAndColor(VkPhysicalDevice
 	return { Format, ColorSpace };
 }
 
-static VkSwapchainKHR VulkanCreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, vk_format_and_color FormatAndColor, v2i WindowResolution, VkSwapchainKHR OldSwapchain = 0) {
+static VkSwapchainKHR VulkanCreateSwapchain(VkDevice Device, VkSurfaceKHR Surface, vk_format_and_color FormatAndColor, v2i WindowResolution) {
 
 	VkFormat Format = FormatAndColor.Format;
 	VkColorSpaceKHR ColorSpace = FormatAndColor.ColorSpace;
@@ -206,7 +206,6 @@ static VkSwapchainKHR VulkanCreateSwapchain(VkDevice Device, VkSurfaceKHR Surfac
 		.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
 		.presentMode = VK_PRESENT_MODE_FIFO_KHR,
 		.clipped = VK_TRUE,
-		.oldSwapchain = OldSwapchain
 	};
 
 	VkSwapchainKHR Result = 0;

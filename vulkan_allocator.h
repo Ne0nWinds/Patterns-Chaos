@@ -21,16 +21,19 @@ struct vulkan_memory_handle {
 using tagged_handle_ptr = tagged_ptr<vulkan_memory_handle, vulkan_memory_handle_type>;
 static_assert(static_cast<u64>(vulkan_memory_handle_type::Count) <= 1 << (64 - tagged_handle_ptr::PtrBitShiftAmount));
 
+static vulkan_memory_handle _DefaultHandle = {};
+static tagged_handle_ptr LastMemoryHandle = tagged_handle_ptr(&_DefaultHandle, vulkan_memory_handle_type::Count);
+
 struct vulkan_arena {
 	VkDeviceMemory Memory;
 	VkDeviceSize Capacity;
 	tagged_handle_ptr MemoryHandles;
 
-	void Reset(vulkan_arena *Arena, VkDevice Device) {
+	void Destroy(VkDevice Device) {
 
 		tagged_handle_ptr CurrentHandle = MemoryHandles;
 
-		while (CurrentHandle) {
+		do {
 			vulkan_memory_handle_type Type = CurrentHandle.GetTag();
 			switch (Type) {
 				case vulkan_memory_handle_type::Image: {
@@ -43,7 +46,10 @@ struct vulkan_arena {
 				} break;
 			}
 			CurrentHandle = CurrentHandle->Next;
-		};
+		} while (CurrentHandle != LastMemoryHandle);
+
+		vkFreeMemory(Device, Memory, NULL);
+		MemoryHandles = {};
 	}
 };
 
@@ -151,7 +157,7 @@ struct vulkan_arena_builder {
 
 		tagged_handle_ptr CurrentHandle = MemoryHandles;
 
-		while (CurrentHandle) {
+		do {
 			vulkan_memory_handle_type Type = CurrentHandle.GetTag();
 			u64 Offset = CurrentHandle->Offset;
 
@@ -169,7 +175,7 @@ struct vulkan_arena_builder {
 			}
 			CurrentHandle = CurrentHandle->Next;
 
-		};
+		} while (CurrentHandle != LastMemoryHandle);
 
 		return Result;
 	}
@@ -179,9 +185,12 @@ static vulkan_arena_builder StartBuildingMemoryArena(VkDevice Device, memory_are
 	vulkan_arena_builder ArenaBuilder = {0};
 	ArenaBuilder.Device = Device;
 	ArenaBuilder.Offset = 0;
-	ArenaBuilder.MemoryHandles = {};
+	ArenaBuilder.MemoryHandles = LastMemoryHandle;
 	ArenaBuilder.CPUArena = CPUArena;
 	ArenaBuilder.AccumulatedMemoryTypeBits = 0;
+	
+	_DefaultHandle.Next = LastMemoryHandle;
+
 	return ArenaBuilder;
 }
 
