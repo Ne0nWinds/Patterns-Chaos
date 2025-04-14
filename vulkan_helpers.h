@@ -80,6 +80,11 @@ static inline VkCommandBuffer VulkanAllocateCommandBuffers(VkDevice Device, VkCo
 	return Result;
 }
 
+using cmd_list_callback = void (*)(VkCommandBuffer);
+static inline void VulkanExecuteCommandsImmediate(VkDevice, VkCommandPool CommandPool, VkQueue Queue, VkCommandBuffer CommandBuffer, cmd_list_callback Callback) {
+
+}
+
 static inline VkCommandBuffer VulkanBeginSingleTimeCommands(VkDevice Device, VkCommandPool CommandPool) {
 
 	VkCommandBuffer CommandBuffer = 0;
@@ -195,7 +200,7 @@ static VkSwapchainKHR VulkanCreateSwapchain(VkDevice Device, VkSurfaceKHR Surfac
 	VkSwapchainCreateInfoKHR CreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
 		.surface = Surface,
-		.minImageCount = FramesInFlight,
+		.minImageCount = 2,
 		.imageFormat = Format,
 		.imageColorSpace = ColorSpace,
 		.imageExtent = { (u32)WindowWidth, (u32)WindowHeight },
@@ -210,5 +215,38 @@ static VkSwapchainKHR VulkanCreateSwapchain(VkDevice Device, VkSurfaceKHR Surfac
 
 	VkSwapchainKHR Result = 0;
 	RuntimeAssert(vkCreateSwapchainKHR(Device, &CreateInfo, NULL, &Result) == VK_SUCCESS);
+	return Result;
+}
+
+static VkShaderModule VulkanCreateShaderModule(range<u32> ShaderByteCode) {
+	const size_t LengthInBytes = ShaderByteCode.Length * 4;
+	VkShaderModuleCreateInfo ShaderModuleCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = LengthInBytes,
+		.pCode = ShaderByteCode.Data
+	};
+	VkShaderModule Result = 0;
+	RuntimeAssert(vkCreateShaderModule(Device, &ShaderModuleCreateInfo, NULL, &Result) == VK_SUCCESS);
+	return Result;
+}
+
+static VkPipeline VulkanCreateComputeShaderPipeline(range<u32> ShaderByteCode, VkPipelineLayout PipelineLayout) {
+
+	VkShaderModule ShaderModule = VulkanCreateShaderModule(ShaderByteCode);
+	OnScopeExit(vkDestroyShaderModule(Device, ShaderModule, NULL));
+
+	VkPipelineShaderStageCreateInfo ShaderStageCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		.stage = VK_SHADER_STAGE_COMPUTE_BIT,
+		.module = ShaderModule,
+		.pName = "main"
+	};
+	VkComputePipelineCreateInfo PipelineCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+		.stage = ShaderStageCreateInfo,
+		.layout = PipelineLayout
+	};
+	VkPipeline Result = 0;
+	RuntimeAssert(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineCreateInfo, NULL, &Result) == VK_SUCCESS);
 	return Result;
 }

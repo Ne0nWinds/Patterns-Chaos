@@ -44,6 +44,7 @@ struct vulkan_arena {
 					VkBuffer Buffer = CurrentHandle->Buffer;
 					vkDestroyBuffer(Device, Buffer, NULL);
 				} break;
+				case vulkan_memory_handle_type::Count: break;
 			}
 			CurrentHandle = CurrentHandle->Next;
 		} while (CurrentHandle != LastMemoryHandle);
@@ -60,7 +61,7 @@ struct vulkan_arena_builder {
 	memory_arena *CPUArena;
 	u32 AccumulatedMemoryTypeBits;
 
-	VkImage Push2DImage(v2i Size, VkFormat Format, VkImageUsageFlags UsageFlags, u64 *OutOffset = 0) {
+	VkImage Push2DImage(v2i Size, VkFormat Format, VkImageUsageFlags UsageFlags) {
 
 		VkImage Result = 0;
 
@@ -87,10 +88,6 @@ struct vulkan_arena_builder {
 		Offset = AlignedOffset + ImageRequirements.size;
 		AccumulatedMemoryTypeBits |= ImageRequirements.memoryTypeBits;
 
-		if (OutOffset) {
-			*OutOffset = AlignedOffset;
-		}
-
 		{
 			tagged_handle_ptr PreviousHandle = MemoryHandles;
 			tagged_handle_ptr NewHandle = tagged_handle_ptr(PushStruct(CPUArena, vulkan_memory_handle), vulkan_memory_handle_type::Image);
@@ -103,7 +100,7 @@ struct vulkan_arena_builder {
 		return Result;
 	}
 
-	VkBuffer PushBuffer(u32 Size, VkBufferUsageFlags UsageFlags, VkSharingMode SharingMode, u64 *OutOffset = 0) {
+	VkBuffer PushBuffer(u32 Size, VkBufferUsageFlags UsageFlags, VkSharingMode SharingMode) {
 
 		VkBuffer Result;
 
@@ -124,10 +121,6 @@ struct vulkan_arena_builder {
 		u32 AlignedOffset = RoundUpPowerOf2(this->Offset, BufferRequirements.alignment);
 		Offset = AlignedOffset + BufferRequirements.size;
 		AccumulatedMemoryTypeBits |= BufferRequirements.memoryTypeBits;
-
-		if (OutOffset) {
-			*OutOffset = AlignedOffset;
-		}
 
 		{
 			tagged_handle_ptr PreviousHandle = MemoryHandles;
@@ -170,8 +163,7 @@ struct vulkan_arena_builder {
 					VkBuffer Buffer = CurrentHandle->Buffer;
 					vkBindBufferMemory(Device, Buffer, Result.Memory, Offset);
 				} break;
-				case vulkan_memory_handle_type::Count: {
-				} break;
+				case vulkan_memory_handle_type::Count: break;
 			}
 			CurrentHandle = CurrentHandle->Next;
 

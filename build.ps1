@@ -14,15 +14,25 @@ if (-not $VULKAN_SDK) {
 
 if ($shaders) {
 	Write-Host "Compiling shaders:" -ForegroundColor Cyan
-	$CMD = "glslc -mfmt=c -fshader-stage=compute .\blit.compute.glsl -o blit.compute.h"
-	Write-Host $CMD -ForegroundColor Yellow
-	Invoke-Expression $CMD
-	if ($LASTEXITCODE -eq 0) {
-		Write-Host "Shaders Compiled Successfully!" -ForegroundColor Green
-	} else {
-		exit 1
+
+	$commands = @(
+		"glslc -mfmt=c -fshader-stage=compute .\clear.compute.glsl -o clear.compute.h",
+		"glslc -mfmt=c -fshader-stage=compute .\reset.compute.glsl -o reset.compute.h",
+		"glslc -mfmt=c -fshader-stage=compute .\fade.compute.glsl -o fade.compute.h",
+		"glslc -mfmt=c -fshader-stage=compute .\simulate.compute.glsl -o simulate.compute.h"
+	)
+
+	foreach ($CMD in $commands) {
+		Write-Host $CMD -ForegroundColor Yellow
+		Invoke-Expression $CMD
+		if ($LASTEXITCODE -eq 0) {
+			Write-Host "Shader compilation successful!" -ForegroundColor Green
+		} else {
+			Write-Host "Shader compilation successful failed" -ForegroundColor Red
+			exit 1
+		}
+		Write-Host ""
 	}
-	Write-Host ""
 }
 
 # Compiler and output settings

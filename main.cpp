@@ -10,7 +10,11 @@ static VkQueue Queue;
 static VkDeviceMemory DeviceMemory;
 
 static constexpr u32 MaxSwapchainImageCount = 4;
-static constexpr u32 FramesInFlight = 2;
+static constexpr u32 FramesInFlight = 1;
+static constexpr u32 MaxParticleCount = 25000;
+static u32 ParticleCount = 2500;
+static bool ResetParticleState = true;
+
 static u32 SwapchainImageCount = 0;
 
 static VkSemaphore ImageAvailableSemaphores[FramesInFlight];
@@ -29,19 +33,44 @@ static VkImage SwapchainImages[MaxSwapchainImageCount];
 static VkCommandPool CommandPool;
 static VkCommandBuffer CommandBuffers[FramesInFlight];
 
-// Blit
-static VkDescriptorSetLayout BlitDescriptorSetLayout;
-static VkDescriptorSet BlitDescriptorSet;
-static VkPipelineLayout BlitPipelineLayout;
-static VkPipeline BlitPipeline;
-static VkBuffer BlitUniformBuffer;
-static VkImage BlitOutputImage;
-static VkImageView BlitOutputImageView;
+static VkDescriptorSetLayout DescriptorSetLayout;
+static VkDescriptorSet DescriptorSet;
+static VkPipelineLayout PipelineLayout;
+static VkImage OutputImage;
+static VkImageView OutputImageView;
+
+enum {
+	BUFFER_IDX_UNIFORM,
+	BUFFER_IDX_POSITION,
+	BUFFER_IDX_ANGLE,
+	BUFFER_IDX_COUNT
+};
+
+static VkDescriptorBufferInfo BufferHandles[BUFFER_IDX_COUNT] = {0};
+
+struct uniform_data {
+	v2i ImageSize;
+	u32 ParticleCount;
+};
+
+static VkPipeline ClearComputePipeline;
+static VkPipeline ResetComputePipeline;
+static VkPipeline FadeComputePipeline;
+static VkPipeline SimulateComputePipeline;
 
 static VkDescriptorPool DescriptorPool;
 
-static u32 BlitComputeShaderBytes[] =
-	#include "blit.compute.h"
+static u32 ResetComputeShader[] =
+	#include "reset.compute.h"
+;
+static u32 FadeComputeShader[] =
+	#include "fade.compute.h"
+;
+static u32 ClearComputeShader[] =
+	#include "clear.compute.h"
+;
+static u32 SimulateComputeShader[] =
+	#include "simulate.compute.h"
 ;
 
 #define OnExitPush(...) {\
@@ -85,39 +114,53 @@ static memory_arena CPURenderData;
 static vulkan_arena GPULocalArena;
 static vulkan_arena GPUVisibleArena;
 
-static u64 UniformBufferOffset;
-
 static void UpdateDescriptorSets() {
-	VkDescriptorBufferInfo BufferInfo = {};
-	BufferInfo.buffer = BlitUniformBuffer;
-	BufferInfo.offset = 0;
-	BufferInfo.range = sizeof(v2i);
 
 	VkDescriptorImageInfo ImageInfo = {};
-	ImageInfo.imageView = BlitOutputImageView;
+	ImageInfo.imageView = OutputImageView;
 	ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-	VkWriteDescriptorSet UniformBufferUpdate = {};
-	UniformBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	UniformBufferUpdate.dstSet = BlitDescriptorSet;
-	UniformBufferUpdate.dstBinding = 1;
-	UniformBufferUpdate.dstArrayElement = 0;
-	UniformBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	UniformBufferUpdate.descriptorCount = 1;
-	UniformBufferUpdate.pBufferInfo = &BufferInfo;
 
 	VkWriteDescriptorSet ImageUpdate = {};
 	ImageUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	ImageUpdate.dstSet = BlitDescriptorSet;
+	ImageUpdate.dstSet = DescriptorSet;
 	ImageUpdate.dstBinding = 0;
 	ImageUpdate.dstArrayElement = 0;
 	ImageUpdate.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	ImageUpdate.descriptorCount = 1;
 	ImageUpdate.pImageInfo = &ImageInfo;
 
+	VkWriteDescriptorSet UniformBufferUpdate = {};
+	UniformBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	UniformBufferUpdate.dstSet = DescriptorSet;
+	UniformBufferUpdate.dstBinding = 1;
+	UniformBufferUpdate.dstArrayElement = 0;
+	UniformBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	UniformBufferUpdate.descriptorCount = 1;
+	UniformBufferUpdate.pBufferInfo = &BufferHandles[BUFFER_IDX_UNIFORM];
+
+	VkWriteDescriptorSet PositionBufferUpdate = {};
+	PositionBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	PositionBufferUpdate.dstSet = DescriptorSet;
+	PositionBufferUpdate.dstBinding = 2;
+	PositionBufferUpdate.dstArrayElement = 0;
+	PositionBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	PositionBufferUpdate.descriptorCount = 1;
+	PositionBufferUpdate.pBufferInfo = &BufferHandles[BUFFER_IDX_POSITION];
+
+	VkWriteDescriptorSet AngleBufferUpdate = {};
+	AngleBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	AngleBufferUpdate.dstSet = DescriptorSet;
+	AngleBufferUpdate.dstBinding = 3;
+	AngleBufferUpdate.dstArrayElement = 0;
+	AngleBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	AngleBufferUpdate.descriptorCount = 1;
+	AngleBufferUpdate.pBufferInfo = &BufferHandles[BUFFER_IDX_ANGLE];
+
 	VkWriteDescriptorSet DescriptorWrites[] = {
-		UniformBufferUpdate,
 		ImageUpdate,
+		UniformBufferUpdate,
+		PositionBufferUpdate,
+		AngleBufferUpdate,
 	};
 	vkUpdateDescriptorSets(Device, ArrayLen(DescriptorWrites), DescriptorWrites, 0, NULL);
 }
@@ -126,10 +169,11 @@ static void CreateSwapchain() {
 	glfwGetFramebufferSize(Window, &WindowWidth, &WindowHeight);
 
 	{
-		v2i *UniformData;
-		vkMapMemory(Device, GPUVisibleArena.Memory, 0, sizeof(v2i), 0, (void **)&UniformData);
-		UniformData->X = WindowWidth;
-		UniformData->Y = WindowHeight;
+		uniform_data *UniformData;
+		vkMapMemory(Device, GPUVisibleArena.Memory, 0, sizeof(uniform_data), 0, (void **)&UniformData);
+		UniformData->ImageSize.X = WindowWidth;
+		UniformData->ImageSize.Y = WindowHeight;
+		UniformData->ParticleCount = ParticleCount;
 		vkUnmapMemory(Device, GPUVisibleArena.Memory);
 	}
 
@@ -152,19 +196,19 @@ static void CreateSwapchain() {
 
 	vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
 	const VkFormat ImageFormat = VK_FORMAT_R8G8B8A8_UNORM;
-	BlitOutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+	OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 	VkPhysicalDeviceMemoryProperties DeviceProperties;
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &DeviceProperties);
 	GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
 	
 
-	if (BlitOutputImageView) {
-		vkDestroyImageView(Device, BlitOutputImageView, NULL);
+	if (OutputImageView) {
+		vkDestroyImageView(Device, OutputImageView, NULL);
 	}
 
 	VkImageViewCreateInfo ImageViewCreateInfo = {};
 	ImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	ImageViewCreateInfo.image = BlitOutputImage;
+	ImageViewCreateInfo.image = OutputImage;
 	ImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	ImageViewCreateInfo.format = ImageFormat;
 	ImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -172,14 +216,14 @@ static void CreateSwapchain() {
 	ImageViewCreateInfo.subresourceRange.levelCount = 1;
 	ImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
 	ImageViewCreateInfo.subresourceRange.layerCount = 1;
-	RuntimeAssert(vkCreateImageView(Device, &ImageViewCreateInfo, NULL, &BlitOutputImageView) == VK_SUCCESS);
+	RuntimeAssert(vkCreateImageView(Device, &ImageViewCreateInfo, NULL, &OutputImageView) == VK_SUCCESS);
 
 	UpdateDescriptorSets();
 
 	{
 		VkCommandBuffer TempCMD = VulkanBeginSingleTimeCommands(Device, CommandPool);
 
-		CmdTransitionImageLayout(TempCMD, BlitOutputImage,
+		CmdTransitionImageLayout(TempCMD, OutputImage,
 			{ VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 },
 			{ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT  }
 		);
@@ -192,6 +236,14 @@ static void CreateSwapchain() {
 		}
 
 		VulkanEndSingleTimeCommands(Device, CommandPool, Queue, TempCMD);
+	}
+
+	ResetParticleState = true;
+}
+
+void KeyCallback(GLFWwindow *Window, int Key, int ScanCode, int Action, int Mods) {
+	if (Key == GLFW_KEY_R && Action == GLFW_PRESS) {
+		ResetParticleState = true;
 	}
 }
 
@@ -294,6 +346,8 @@ s32 main() {
 			Window = glfwCreateWindow(WindowWidth, WindowHeight, "Primordial Particle System", NULL, NULL);
 			RuntimeAssert(Window);
 
+			glfwSetKeyCallback(Window, KeyCallback);
+
 			glfwCreateWindowSurface(Instance, Window, NULL, &Surface);
 			RuntimeAssert(Surface);
 
@@ -318,10 +372,31 @@ s32 main() {
 				.descriptorCount = 1,
 				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 			};
+			VkDescriptorSetLayoutBinding PositionBinding = {
+				.binding = 2,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			};
+			VkDescriptorSetLayoutBinding VelocityBinding = {
+				.binding = 3,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			};
+			VkDescriptorSetLayoutBinding AngleBinding = {
+				.binding = 4,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			};
 
 			VkDescriptorSetLayoutBinding Bindings[] = {
 				ImageBinding,
-				UniformBufferBinding
+				UniformBufferBinding,
+				PositionBinding,
+				VelocityBinding,
+				AngleBinding
 			};
 
 			bool Succeeded = true;
@@ -331,10 +406,10 @@ s32 main() {
 				.bindingCount = ArrayLen(Bindings),
 				.pBindings = Bindings
 			};
-			RuntimeAssert(vkCreateDescriptorSetLayout(Device, &LayoutInfo, NULL, &BlitDescriptorSetLayout) == VK_SUCCESS);
-			OnExitPush(vkDestroyDescriptorSetLayout(Device, BlitDescriptorSetLayout, NULL));
+			RuntimeAssert(vkCreateDescriptorSetLayout(Device, &LayoutInfo, NULL, &DescriptorSetLayout) == VK_SUCCESS);
+			OnExitPush(vkDestroyDescriptorSetLayout(Device, DescriptorSetLayout, NULL));
 
-			VkDescriptorPoolSize PoolSizes[2] = {
+			VkDescriptorPoolSize PoolSizes[3] = {
 				{
 					.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 					.descriptorCount = 1
@@ -342,11 +417,15 @@ s32 main() {
 				{
 					.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 					.descriptorCount = 1
-				}
+				},
+				{
+					.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+					.descriptorCount = 3
+				},
 			};
 			VkDescriptorPoolCreateInfo PoolInfo = {};
 			PoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			PoolInfo.poolSizeCount = 2;
+			PoolInfo.poolSizeCount = ArrayLen(PoolSizes);
 			PoolInfo.pPoolSizes = PoolSizes;
 			PoolInfo.maxSets = 1;
 			RuntimeAssert(vkCreateDescriptorPool(Device, &PoolInfo, NULL, &DescriptorPool) == VK_SUCCESS);
@@ -356,81 +435,31 @@ s32 main() {
 			DescriptorSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 			DescriptorSetAllocInfo.descriptorPool = DescriptorPool;
 			DescriptorSetAllocInfo.descriptorSetCount = 1;
-			DescriptorSetAllocInfo.pSetLayouts = &BlitDescriptorSetLayout;
-			RuntimeAssert(vkAllocateDescriptorSets(Device, &DescriptorSetAllocInfo, &BlitDescriptorSet) == VK_SUCCESS);
-			// OnExitPush([](){ vkFreeDescriptorSets(Device, DescriptorPool, 1, &BlitDescriptorSet); });
-
-			constexpr u32 CodeSize = sizeof(BlitComputeShaderBytes);
-			VkShaderModuleCreateInfo ShaderModuleCreateInfo = {
-				.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-				.codeSize = CodeSize,
-				.pCode = BlitComputeShaderBytes
-			};
-			VkShaderModule BlitShaderModule;
-			RuntimeAssert(vkCreateShaderModule(Device, &ShaderModuleCreateInfo, NULL, &BlitShaderModule) == VK_SUCCESS);
-			OnScopeExit(vkDestroyShaderModule(Device, BlitShaderModule, NULL));
+			DescriptorSetAllocInfo.pSetLayouts = &DescriptorSetLayout;
+			RuntimeAssert(vkAllocateDescriptorSets(Device, &DescriptorSetAllocInfo, &DescriptorSet) == VK_SUCCESS);
+			// OnExitPush([](){ vkFreeDescriptorSets(Device, DescriptorPool, 1, &DescriptorSet); });
 
 			VkPipelineLayoutCreateInfo PipelineLayoutInfo = {
 				.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 				.setLayoutCount = 1,
-				.pSetLayouts = &BlitDescriptorSetLayout
+				.pSetLayouts = &DescriptorSetLayout
 			};
-			RuntimeAssert(vkCreatePipelineLayout(Device, &PipelineLayoutInfo, NULL, &BlitPipelineLayout) == VK_SUCCESS);
-			OnExitPush(vkDestroyPipelineLayout(Device, BlitPipelineLayout, NULL));
+			RuntimeAssert(vkCreatePipelineLayout(Device, &PipelineLayoutInfo, NULL, &PipelineLayout) == VK_SUCCESS);
+			OnExitPush(vkDestroyPipelineLayout(Device, PipelineLayout, NULL));
 
-			VkPipelineShaderStageCreateInfo ShaderStageCreateInfo = {
-				.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-				.stage = VK_SHADER_STAGE_COMPUTE_BIT,
-				.module = BlitShaderModule,
-				.pName = "main"
-			};
-			VkComputePipelineCreateInfo PipelineCreateInfo = {
-				.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-				.stage = ShaderStageCreateInfo,
-				.layout = BlitPipelineLayout
-			};
-			RuntimeAssert(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineCreateInfo, NULL, &BlitPipeline) == VK_SUCCESS);
-			OnExitPush(vkDestroyPipeline(Device, BlitPipeline, NULL));
+			ResetComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(ResetComputeShader), PipelineLayout);
+			ClearComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(ClearComputeShader), PipelineLayout);
+			FadeComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(FadeComputeShader), PipelineLayout);
+			SimulateComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(SimulateComputeShader), PipelineLayout);
+			OnExitPush({
+				vkDestroyPipeline(Device, ResetComputePipeline, NULL);
+				vkDestroyPipeline(Device, ClearComputePipeline, NULL);
+				vkDestroyPipeline(Device, FadeComputePipeline, NULL);
+				vkDestroyPipeline(Device, SimulateComputePipeline, NULL);
+			});
 
 			RuntimeAssert(Succeeded);
 
-#if 0
-			VkBufferCreateInfo BufferCreateInfo = {
-				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-				.size = sizeof(v2i),
-				.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-				.sharingMode = VK_SHARING_MODE_EXCLUSIVE
-			};
-			RuntimeAssert(vkCreateBuffer(Device, &BufferCreateInfo, NULL, &BlitUniformBuffer) == VK_SUCCESS);
-			OnExitPush(vkDestroyBuffer(Device, BlitUniformBuffer, NULL));
-
-			VkPhysicalDeviceMemoryProperties MemoryProperties;
-			vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &MemoryProperties);
-
-			VkMemoryRequirements UniformBufferRequirements;
-			vkGetBufferMemoryRequirements(Device, BlitUniformBuffer, &UniformBufferRequirements);
-
-			VkMemoryAllocateInfo AllocateInfo = {};
-			AllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-			AllocateInfo.allocationSize = UniformBufferRequirements.size;
-			AllocateInfo.memoryTypeIndex = FindMemoryType(UniformBufferRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, MemoryProperties);
-			RuntimeAssert(vkAllocateMemory(Device, &AllocateInfo, NULL, &CPUVisibleMemory) == VK_SUCCESS);
-			OnExitPush(vkFreeMemory(Device, CPUVisibleMemory, NULL));
-
-			RuntimeAssert(vkBindBufferMemory(Device, BlitUniformBuffer, CPUVisibleMemory, 0) == VK_SUCCESS);
-
-			VkMemoryRequirements ImageRequirements;
-			vkGetImageMemoryRequirements(Device, BlitOutputImage, &ImageRequirements);
-
-			AllocateInfo = {};
-			AllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-			AllocateInfo.allocationSize = ImageRequirements.size;
-			AllocateInfo.memoryTypeIndex = FindMemoryType(ImageRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, MemoryProperties);
-			RuntimeAssert(vkAllocateMemory(Device, &AllocateInfo, NULL, &GPULocalMemory) == VK_SUCCESS);
-			OnExitPush(vkFreeMemory(Device, GPULocalMemory, NULL));
-
-			RuntimeAssert(vkBindImageMemory(Device, BlitOutputImage, GPULocalMemory, 0) == VK_SUCCESS);
-#endif 
 			VkPhysicalDeviceMemoryProperties DeviceProperties;
 			vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &DeviceProperties);
 
@@ -438,12 +467,14 @@ s32 main() {
 
 			{
 				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
-				BlitOutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+				OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 				GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
 			}
 			{
 				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
-				BlitUniformBuffer = ArenaBuilder.PushBuffer(sizeof(v2i), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE, &UniformBufferOffset);
+				BufferHandles[BUFFER_IDX_UNIFORM].buffer = ArenaBuilder.PushBuffer(sizeof(uniform_data), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+				BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+				BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
 				GPUVisibleArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, DeviceProperties);
 			}
 			OnExitPush({
@@ -451,11 +482,12 @@ s32 main() {
 				GPUVisibleArena.Destroy(Device);
 			});
 
-		}
+			for (u32 i = 0; i < ArrayLen(BufferHandles); ++i) {
+				BufferHandles[i].offset = 0;
+				BufferHandles[i].range = VK_WHOLE_SIZE;
+			}
 
-		{
 		}
-
 
 		{
 			VkCommandPoolCreateInfo CommandPoolCreateInfo = {
@@ -472,7 +504,7 @@ s32 main() {
 
 		CreateSwapchain();
 		OnExitPush(vkDestroySwapchainKHR(Device, Swapchain, NULL));
-		OnExitPush(vkDestroyImageView(Device, BlitOutputImageView, NULL));
+		OnExitPush(vkDestroyImageView(Device, OutputImageView, NULL));
 
 		Reset(&Temp);
 	}
@@ -506,6 +538,7 @@ s32 main() {
 		if (AcquireImageResult == VK_ERROR_OUT_OF_DATE_KHR || AcquireImageResult == VK_SUBOPTIMAL_KHR) {
 			vkDeviceWaitIdle(Device);
 			CreateSwapchain();
+			CurrentFrame = 0;
 			continue;
 		} else {
 			RuntimeAssert(AcquireImageResult == VK_SUCCESS);
@@ -527,16 +560,49 @@ s32 main() {
 			constexpr cmd_image_transition PresentTransition =
 				{ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0 };
 
-			CmdTransitionImageLayout(CommandBuffer, BlitOutputImage, TransferSrcTransition, ComputeTransition);
+			CmdTransitionImageLayout(CommandBuffer, OutputImage, TransferSrcTransition, ComputeTransition);
 
-			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, BlitPipeline);
-			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, BlitPipelineLayout, 0, 1, &BlitDescriptorSet, 0, NULL);
+			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, PipelineLayout, 0, 1, &DescriptorSet, 0, NULL);
+
+			// vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ClearComputePipeline);
+			// vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
+
+			if (ResetParticleState) {
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ResetComputePipeline);
+				vkCmdDispatch(CommandBuffer, (ParticleCount + 63) / 64, 1, 1);
+
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ClearComputePipeline);
+				vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
+
+				VkBuffer Buffers[] = {
+					BufferHandles[BUFFER_IDX_POSITION].buffer,
+					BufferHandles[BUFFER_IDX_ANGLE].buffer,
+				};
+				VkMemoryBarrier Barriers[ArrayLen(Buffers)] = {};
+				for (u32 i = 0; i < ArrayLen(Barriers); ++i) {
+					Barriers[i].sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					Barriers[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+					Barriers[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+				}
+				vkCmdPipelineBarrier(CommandBuffer,
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					0, ArrayLen(Barriers), (const VkMemoryBarrier *)&Barriers, 0, NULL, 0, NULL
+				);
+				CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeTransition, ComputeTransition);
+				ResetParticleState = false;
+			}
+
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, SimulateComputePipeline);
+			vkCmdDispatch(CommandBuffer, (ParticleCount + 63) / 64, 1, 1);
+
+			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeTransition, ComputeTransition);
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, FadeComputePipeline);
 			vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
 
-			CmdTransitionImageLayout(CommandBuffer, BlitOutputImage, ComputeTransition, TransferSrcTransition);
+			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeTransition, TransferSrcTransition);
 			CmdTransitionImageLayout(CommandBuffer, SwapchainImages[ImageIndex], PresentTransition, TransferDstTransition);
 			v2i Resolution = { WindowWidth, WindowHeight };
-			CmdBlit2DImage(CommandBuffer, BlitOutputImage, SwapchainImages[ImageIndex], Resolution, Resolution);
+			CmdBlit2DImage(CommandBuffer, OutputImage, SwapchainImages[ImageIndex], Resolution, Resolution);
 			CmdTransitionImageLayout(CommandBuffer, SwapchainImages[ImageIndex], TransferDstTransition, PresentTransition);
 
 			VulkanEndCommands(CommandBuffer);
@@ -567,6 +633,7 @@ s32 main() {
 		if (PresentResult == VK_ERROR_OUT_OF_DATE_KHR || PresentResult == VK_SUBOPTIMAL_KHR) {
 			vkDeviceWaitIdle(Device);
 			CreateSwapchain();
+			CurrentFrame = 0;
 			continue;
 		}
 
