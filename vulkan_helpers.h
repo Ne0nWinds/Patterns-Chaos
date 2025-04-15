@@ -182,7 +182,7 @@ static vk_format_and_color VulkanGetBestAvailableFormatAndColor(VkPhysicalDevice
 	VkColorSpaceKHR ColorSpace = SurfaceFormats[0].colorSpace;
 	for (u32 i = 1; i < SurfaceFormatCount; ++i) {
 		VkSurfaceFormatKHR SurfaceFormat = SurfaceFormats[i];
-		if (SurfaceFormat.format == VK_FORMAT_B8G8R8A8_SRGB &&
+		if (SurfaceFormat.format == VK_FORMAT_R8G8B8A8_UNORM &&
 			SurfaceFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
 			Format = SurfaceFormat.format;
 			ColorSpace = SurfaceFormat.colorSpace;

@@ -6,6 +6,7 @@ layout(set = 0, binding = 0, rgba8) uniform image2D OutputImage;
 layout(set = 0, binding = 1) uniform BoundUniforms {
 	ivec2 ImageSize;
 	uint ParticleCount;
+	uint FrameNumber;
 };
 layout(set = 0, binding = 2, std430) buffer PositionBuffer {
 	vec2 Positions[];

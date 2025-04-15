@@ -11,7 +11,7 @@ void main() {
 	}
 
 	vec4 value = imageLoad(OutputImage, texel);
-	value.xyz *= 0.75; 
-	value.xyz *= step(1.0 / 256.0, value.xyz);
+	value.xyz *= 1.0 - (1.0 / 32.0); 
+	value.xyz *= step(0.125, value.xyz);
 	imageStore(OutputImage, texel, value);
 }

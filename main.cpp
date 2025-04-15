@@ -11,8 +11,9 @@ static VkDeviceMemory DeviceMemory;
 
 static constexpr u32 MaxSwapchainImageCount = 4;
 static constexpr u32 FramesInFlight = 1;
-static constexpr u32 MaxParticleCount = 25000;
-static u32 ParticleCount = 2500;
+static constexpr u32 MaxParticleCount = 50000;
+static u32 ParticleCount = 10000;
+static u32 FrameNumber = 0;
 static bool ResetParticleState = true;
 
 static u32 SwapchainImageCount = 0;
@@ -51,6 +52,7 @@ static VkDescriptorBufferInfo BufferHandles[BUFFER_IDX_COUNT] = {0};
 struct uniform_data {
 	v2i ImageSize;
 	u32 ParticleCount;
+	u32 FrameNumber;
 };
 
 static VkPipeline ClearComputePipeline;
@@ -168,15 +170,6 @@ static void UpdateDescriptorSets() {
 static void CreateSwapchain() {
 	glfwGetFramebufferSize(Window, &WindowWidth, &WindowHeight);
 
-	{
-		uniform_data *UniformData;
-		vkMapMemory(Device, GPUVisibleArena.Memory, 0, sizeof(uniform_data), 0, (void **)&UniformData);
-		UniformData->ImageSize.X = WindowWidth;
-		UniformData->ImageSize.Y = WindowHeight;
-		UniformData->ParticleCount = ParticleCount;
-		vkUnmapMemory(Device, GPUVisibleArena.Memory);
-	}
-
 	VkSurfaceCapabilitiesKHR Capabilities = {};
 	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(PhysicalDevice, Surface, &Capabilities);
 
@@ -185,7 +178,7 @@ static void CreateSwapchain() {
 
 	vk_format_and_color FormatAndColor = VulkanGetBestAvailableFormatAndColor(PhysicalDevice, Surface);
 	vkDestroySwapchainKHR(Device, Swapchain, NULL);
-	Swapchain = VulkanCreateSwapchain(Device, Surface, FormatAndColor, { WindowWidth, WindowHeight });
+	Swapchain = VulkanCreateSwapchain(Device, Surface, FormatAndColor, { Width, Height });
 
 	vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, NULL);
 	RuntimeAssert(SwapchainImageCount <= MaxSwapchainImageCount && SwapchainImageCount > 0);
@@ -473,8 +466,8 @@ s32 main() {
 			{
 				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
 				BufferHandles[BUFFER_IDX_UNIFORM].buffer = ArenaBuilder.PushBuffer(sizeof(uniform_data), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-				BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-				BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+				BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+				BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
 				GPUVisibleArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, DeviceProperties);
 			}
 			OnExitPush({
@@ -539,12 +532,23 @@ s32 main() {
 			vkDeviceWaitIdle(Device);
 			CreateSwapchain();
 			CurrentFrame = 0;
+			FrameNumber = 0;
 			continue;
 		} else {
 			RuntimeAssert(AcquireImageResult == VK_SUCCESS);
 		}
 
 		vkResetFences(Device, 1, InFlightFences + CurrentFrame);
+
+		{
+			uniform_data *UniformData;
+			vkMapMemory(Device, GPUVisibleArena.Memory, 0, sizeof(uniform_data), 0, (void **)&UniformData);
+			UniformData->ImageSize.X = WindowWidth;
+			UniformData->ImageSize.Y = WindowHeight;
+			UniformData->ParticleCount = ParticleCount;
+			UniformData->FrameNumber = FrameNumber;
+			vkUnmapMemory(Device, GPUVisibleArena.Memory);
+		}
 
 		VkCommandBuffer CommandBuffer = CommandBuffers[CurrentFrame];
 		{
@@ -634,11 +638,13 @@ s32 main() {
 			vkDeviceWaitIdle(Device);
 			CreateSwapchain();
 			CurrentFrame = 0;
+			FrameNumber = 0;
 			continue;
 		}
 
 		CurrentFrame += 1;
 		CurrentFrame %= FramesInFlight;
+		FrameNumber += 1;
 	}
 
 	vkDeviceWaitIdle(Device);
