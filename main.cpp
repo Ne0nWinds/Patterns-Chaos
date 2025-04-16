@@ -112,9 +112,8 @@ static inline s32 S32_Clamp(s32 A, s32 Min, s32 Max) {
 	return S32_Min(S32_Max(A, Min), Max);
 }
 
-static memory_arena CPURenderData;
-static vulkan_arena GPULocalArena;
-static vulkan_arena GPUVisibleArena;
+static vulkan_arena<3> GPULocalArena;
+static vulkan_arena<1> GPUVisibleArena;
 
 static void UpdateDescriptorSets() {
 
@@ -184,16 +183,16 @@ static void CreateSwapchain() {
 	RuntimeAssert(SwapchainImageCount <= MaxSwapchainImageCount && SwapchainImageCount > 0);
 	RuntimeAssert(vkGetSwapchainImagesKHR(Device, Swapchain, &SwapchainImageCount, SwapchainImages) == VK_SUCCESS);
 
-	GPULocalArena.Destroy(Device);
-	Reset(&CPURenderData);
-
-	vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
 	const VkFormat ImageFormat = VK_FORMAT_R8G8B8A8_UNORM;
-	OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 	VkPhysicalDeviceMemoryProperties DeviceProperties;
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &DeviceProperties);
+
+	GPULocalArena.Destroy(Device);
+	vulkan_arena_builder<3> ArenaBuilder = StartBuildingMemoryArena<3>(Device);
+	BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+	BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+	OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 	GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
-	
 
 	if (OutputImageView) {
 		vkDestroyImageView(Device, OutputImageView, NULL);
@@ -213,9 +212,7 @@ static void CreateSwapchain() {
 
 	UpdateDescriptorSets();
 
-	{
-		VkCommandBuffer TempCMD = VulkanBeginSingleTimeCommands(Device, CommandPool);
-
+	const auto TransitionImagesCmdList = [](const VkCommandBuffer TempCMD){
 		CmdTransitionImageLayout(TempCMD, OutputImage,
 			{ VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 },
 			{ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT  }
@@ -227,10 +224,9 @@ static void CreateSwapchain() {
 				{ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0 }
 			);
 		}
+	};
 
-		VulkanEndSingleTimeCommands(Device, CommandPool, Queue, TempCMD);
-	}
-
+	VulkanExecuteCommandsImmediate(Device, CommandPool, Queue, TransitionImagesCmdList);
 	ResetParticleState = true;
 }
 
@@ -242,7 +238,6 @@ void KeyCallback(GLFWwindow *Window, int Key, int ScanCode, int Action, int Mods
 
 s32 main() {
 	Temp = CreateMemoryArena(MB(32));
-	CPURenderData = CreateMemoryArena(MB(64));
 
 	// Init
 	{
@@ -371,14 +366,8 @@ s32 main() {
 				.descriptorCount = 1,
 				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 			};
-			VkDescriptorSetLayoutBinding VelocityBinding = {
-				.binding = 3,
-				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				.descriptorCount = 1,
-				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-			};
 			VkDescriptorSetLayoutBinding AngleBinding = {
-				.binding = 4,
+				.binding = 3,
 				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
 				.descriptorCount = 1,
 				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -388,7 +377,6 @@ s32 main() {
 				ImageBinding,
 				UniformBufferBinding,
 				PositionBinding,
-				VelocityBinding,
 				AngleBinding
 			};
 
@@ -413,7 +401,7 @@ s32 main() {
 				},
 				{
 					.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-					.descriptorCount = 3
+					.descriptorCount = 2
 				},
 			};
 			VkDescriptorPoolCreateInfo PoolInfo = {};
@@ -459,15 +447,8 @@ s32 main() {
 			const VkFormat ImageFormat = VK_FORMAT_R8G8B8A8_UNORM;
 
 			{
-				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
-				OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
-				GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
-			}
-			{
-				vulkan_arena_builder ArenaBuilder = StartBuildingMemoryArena(Device, &CPURenderData);
+				vulkan_arena_builder<1> ArenaBuilder = StartBuildingMemoryArena<1>(Device);
 				BufferHandles[BUFFER_IDX_UNIFORM].buffer = ArenaBuilder.PushBuffer(sizeof(uniform_data), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-				BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-				BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
 				GPUVisibleArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, DeviceProperties);
 			}
 			OnExitPush({

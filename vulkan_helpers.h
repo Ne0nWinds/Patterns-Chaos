@@ -81,28 +81,20 @@ static inline VkCommandBuffer VulkanAllocateCommandBuffers(VkDevice Device, VkCo
 }
 
 using cmd_list_callback = void (*)(VkCommandBuffer);
-static inline void VulkanExecuteCommandsImmediate(VkDevice, VkCommandPool CommandPool, VkQueue Queue, VkCommandBuffer CommandBuffer, cmd_list_callback Callback) {
+static inline void VulkanExecuteCommandsImmediate(VkDevice, VkCommandPool CommandPool, VkQueue Queue, cmd_list_callback Callback) {
 
-}
-
-static inline VkCommandBuffer VulkanBeginSingleTimeCommands(VkDevice Device, VkCommandPool CommandPool) {
-
-	VkCommandBuffer CommandBuffer = 0;
+	VkCommandBuffer TempCMD = 0;
 
 	VkCommandBufferAllocateInfo CommandBufferAllocateInfo = {};
 	CommandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	CommandBufferAllocateInfo.commandPool = CommandPool;
 	CommandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	CommandBufferAllocateInfo.commandBufferCount = 1;
-	RuntimeAssert(vkAllocateCommandBuffers(Device, &CommandBufferAllocateInfo, &CommandBuffer) == VK_SUCCESS);
+	RuntimeAssert(vkAllocateCommandBuffers(Device, &CommandBufferAllocateInfo, &TempCMD) == VK_SUCCESS);
 
-	VulkanBeginCommands(CommandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-
-	return CommandBuffer;
-}
-
-static inline void VulkanEndSingleTimeCommands(VkDevice Device, VkCommandPool CommandPool, VkQueue Queue, VkCommandBuffer CommandBuffer) {
-	VulkanEndCommands(CommandBuffer);
+	VulkanBeginCommands(TempCMD, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+	Callback(TempCMD);
+	VulkanEndCommands(TempCMD);
 
 	VkFence CompletionFence = VulkanCreateFence(Device, false);
 	OnScopeExit(vkDestroyFence(Device, CompletionFence, NULL));
@@ -110,12 +102,12 @@ static inline void VulkanEndSingleTimeCommands(VkDevice Device, VkCommandPool Co
 	VkSubmitInfo SubmitInfo = {};
 	SubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	SubmitInfo.commandBufferCount = 1;
-	SubmitInfo.pCommandBuffers = &CommandBuffer;
+	SubmitInfo.pCommandBuffers = &TempCMD;
 
 	RuntimeAssert(vkQueueSubmit(Queue, 1, &SubmitInfo, CompletionFence) == VK_SUCCESS);
 	RuntimeAssert(vkWaitForFences(Device, 1, &CompletionFence, VK_TRUE, UINT64_MAX) == VK_SUCCESS);
 
-	vkFreeCommandBuffers(Device, CommandPool, 1, &CommandBuffer);
+	vkFreeCommandBuffers(Device, CommandPool, 1, &TempCMD);
 }
 
 struct cmd_image_transition {

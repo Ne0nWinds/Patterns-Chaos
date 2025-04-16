@@ -9,57 +9,49 @@ enum class vulkan_memory_handle_type : u64 {
 };
 
 struct vulkan_memory_handle {
+	vulkan_memory_handle_type Type;
+
 	union {
 		VkImage Image;
 		VkBuffer Buffer;
 	};
-
 	u64 Offset;
-	tagged_ptr<vulkan_memory_handle, vulkan_memory_handle_type> Next;
 };
 
-using tagged_handle_ptr = tagged_ptr<vulkan_memory_handle, vulkan_memory_handle_type>;
-static_assert(static_cast<u64>(vulkan_memory_handle_type::Count) <= 1 << (64 - tagged_handle_ptr::PtrBitShiftAmount));
-
-static vulkan_memory_handle _DefaultHandle = {};
-static tagged_handle_ptr LastMemoryHandle = tagged_handle_ptr(&_DefaultHandle, vulkan_memory_handle_type::Count);
-
+template <u32 Count>
 struct vulkan_arena {
 	VkDeviceMemory Memory;
 	VkDeviceSize Capacity;
-	tagged_handle_ptr MemoryHandles;
+	vulkan_memory_handle MemoryHandles[Count];
 
 	void Destroy(VkDevice Device) {
 
-		tagged_handle_ptr CurrentHandle = MemoryHandles;
-
-		do {
-			vulkan_memory_handle_type Type = CurrentHandle.GetTag();
-			switch (Type) {
+		for (u32 i = 0; i < Count; ++i) {
+			const vulkan_memory_handle &CurrentHandle = MemoryHandles[i];
+			switch (CurrentHandle.Type) {
 				case vulkan_memory_handle_type::Image: {
-					VkImage Image = CurrentHandle->Image;
+					VkImage Image = CurrentHandle.Image;
 					vkDestroyImage(Device, Image, NULL);
 				} break;
 				case vulkan_memory_handle_type::Buffer: {
-					VkBuffer Buffer = CurrentHandle->Buffer;
+					VkBuffer Buffer = CurrentHandle.Buffer;
 					vkDestroyBuffer(Device, Buffer, NULL);
 				} break;
 				case vulkan_memory_handle_type::Count: break;
 			}
-			CurrentHandle = CurrentHandle->Next;
-		} while (CurrentHandle != LastMemoryHandle);
+		}
 
 		vkFreeMemory(Device, Memory, NULL);
-		MemoryHandles = {};
 	}
 };
 
+template <u32 Count>
 struct vulkan_arena_builder {
 	VkDevice Device;
 	VkDeviceSize Offset;
-	tagged_handle_ptr MemoryHandles;
-	memory_arena *CPUArena;
 	u32 AccumulatedMemoryTypeBits;
+	u32 CurrentHandleIndex;
+	vulkan_memory_handle MemoryHandles[Count];
 
 	VkImage Push2DImage(v2i Size, VkFormat Format, VkImageUsageFlags UsageFlags) {
 
@@ -88,21 +80,17 @@ struct vulkan_arena_builder {
 		Offset = AlignedOffset + ImageRequirements.size;
 		AccumulatedMemoryTypeBits |= ImageRequirements.memoryTypeBits;
 
-		{
-			tagged_handle_ptr PreviousHandle = MemoryHandles;
-			tagged_handle_ptr NewHandle = tagged_handle_ptr(PushStruct(CPUArena, vulkan_memory_handle), vulkan_memory_handle_type::Image);
-			NewHandle->Next = PreviousHandle;
-			NewHandle->Offset = AlignedOffset;
-			NewHandle->Image = Result;
-			MemoryHandles = NewHandle;
-		}
+		vulkan_memory_handle &Handle = MemoryHandles[CurrentHandleIndex++];
+		Handle.Type = vulkan_memory_handle_type::Image;
+		Handle.Offset = AlignedOffset;
+		Handle.Image = Result;
 
 		return Result;
 	}
 
 	VkBuffer PushBuffer(u32 Size, VkBufferUsageFlags UsageFlags, VkSharingMode SharingMode) {
 
-		VkBuffer Result;
+		VkBuffer Result = 0;
 
 		VkBufferCreateInfo BufferCreateInfo = {
 			.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -122,66 +110,53 @@ struct vulkan_arena_builder {
 		Offset = AlignedOffset + BufferRequirements.size;
 		AccumulatedMemoryTypeBits |= BufferRequirements.memoryTypeBits;
 
-		{
-			tagged_handle_ptr PreviousHandle = MemoryHandles;
-			tagged_handle_ptr NewHandle = tagged_handle_ptr(PushStruct(CPUArena, vulkan_memory_handle), vulkan_memory_handle_type::Buffer);
-			NewHandle->Next = PreviousHandle;
-			NewHandle->Offset = AlignedOffset;
-			NewHandle->Buffer = Result;
-			MemoryHandles = NewHandle;
-		}
+		vulkan_memory_handle &Handle = MemoryHandles[CurrentHandleIndex++];
+		Handle.Type = vulkan_memory_handle_type::Buffer;
+		Handle.Offset = AlignedOffset;
+		Handle.Buffer = Result;
 
 		return Result;
 	}
 
 	[[nodiscard]]
-	vulkan_arena CommitAndAllocateArena(VkMemoryPropertyFlags MemoryProperties, const VkPhysicalDeviceMemoryProperties &PhysicalDeviceMemoryProperties) {
+	vulkan_arena<Count> CommitAndAllocateArena(VkMemoryPropertyFlags MemoryProperties, const VkPhysicalDeviceMemoryProperties &PhysicalDeviceMemoryProperties) {
 
-		vulkan_arena Result = {};
+		RuntimeAssert(CurrentHandleIndex == Count);
+
+		vulkan_arena<Count> Result = {};
 		Result.Capacity = Offset;
-		Result.MemoryHandles = MemoryHandles;
 
 		VkMemoryAllocateInfo AllocateInfo = {
 			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-			.allocationSize = Offset,
+			.allocationSize = this->Offset,
 			.memoryTypeIndex = FindMemoryType(AccumulatedMemoryTypeBits, MemoryProperties, PhysicalDeviceMemoryProperties)
 		};
-		vkAllocateMemory(Device, &AllocateInfo, NULL, &Result.Memory);
+		RuntimeAssert(vkAllocateMemory(Device, &AllocateInfo, NULL, &Result.Memory) == VK_SUCCESS);
 
-		tagged_handle_ptr CurrentHandle = MemoryHandles;
-
-		do {
-			vulkan_memory_handle_type Type = CurrentHandle.GetTag();
-			u64 Offset = CurrentHandle->Offset;
-
-			switch (Type) {
+		for (u32 i = 0; i < Count; ++i) {
+			const vulkan_memory_handle &CurrentHandle = MemoryHandles[i];
+			switch (CurrentHandle.Type) {
 				case vulkan_memory_handle_type::Image: {
-					VkImage Image = CurrentHandle->Image;
-					vkBindImageMemory(Device, Image, Result.Memory, Offset);
+					VkImage Image = CurrentHandle.Image;
+					vkBindImageMemory(Device, Image, Result.Memory, CurrentHandle.Offset);
 				} break;
 				case vulkan_memory_handle_type::Buffer: {
-					VkBuffer Buffer = CurrentHandle->Buffer;
-					vkBindBufferMemory(Device, Buffer, Result.Memory, Offset);
+					VkBuffer Buffer = CurrentHandle.Buffer;
+					vkBindBufferMemory(Device, Buffer, Result.Memory, CurrentHandle.Offset);
 				} break;
 				case vulkan_memory_handle_type::Count: break;
 			}
-			CurrentHandle = CurrentHandle->Next;
-
-		} while (CurrentHandle != LastMemoryHandle);
+			Result.MemoryHandles[i] = CurrentHandle;
+		}
 
 		return Result;
 	}
 };
 
-static vulkan_arena_builder StartBuildingMemoryArena(VkDevice Device, memory_arena *CPUArena) {
-	vulkan_arena_builder ArenaBuilder = {0};
+template <u32 Count>
+static vulkan_arena_builder<Count> StartBuildingMemoryArena(VkDevice Device) {
+	vulkan_arena_builder<Count> ArenaBuilder = {};
 	ArenaBuilder.Device = Device;
-	ArenaBuilder.Offset = 0;
-	ArenaBuilder.MemoryHandles = LastMemoryHandle;
-	ArenaBuilder.CPUArena = CPUArena;
-	ArenaBuilder.AccumulatedMemoryTypeBits = 0;
-	
-	_DefaultHandle.Next = LastMemoryHandle;
 
 	return ArenaBuilder;
 }
