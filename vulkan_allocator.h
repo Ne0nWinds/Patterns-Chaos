@@ -88,7 +88,7 @@ struct vulkan_arena_builder {
 		return Result;
 	}
 
-	VkBuffer PushBuffer(u32 Size, VkBufferUsageFlags UsageFlags, VkSharingMode SharingMode) {
+	VkBuffer PushBuffer(u64 Size, VkBufferUsageFlags UsageFlags, VkSharingMode SharingMode) {
 
 		VkBuffer Result = 0;
 
@@ -106,7 +106,7 @@ struct vulkan_arena_builder {
 
 		AccumulatedMemoryTypeBits |= BufferRequirements.memoryTypeBits;
 
-		u32 AlignedOffset = RoundUpPowerOf2(this->Offset, BufferRequirements.alignment);
+		u64 AlignedOffset = RoundUpPowerOf2(this->Offset, BufferRequirements.alignment);
 		Offset = AlignedOffset + BufferRequirements.size;
 		AccumulatedMemoryTypeBits |= BufferRequirements.memoryTypeBits;
 

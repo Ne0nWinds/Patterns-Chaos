@@ -1,5 +1,7 @@
 #include "base.h"
 
+#include "shared_constants.h"
+
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
 
@@ -11,8 +13,8 @@ static VkDeviceMemory DeviceMemory;
 
 static constexpr u32 MaxSwapchainImageCount = 4;
 static constexpr u32 FramesInFlight = 1;
-static constexpr u32 MaxParticleCount = 50000;
-static u32 ParticleCount = 10000;
+static constexpr u32 MaxParticleCount = MAX_PARTICLE_COUNT;
+static u32 ParticleCount = MaxParticleCount;
 static u32 FrameNumber = 0;
 static bool ResetParticleState = true;
 
@@ -26,7 +28,7 @@ static VkPipeline Pipeline;
 static VkSurfaceKHR Surface;
 static VkSwapchainKHR Swapchain = 0;
 static GLFWwindow *Window = 0;
-static int WindowWidth = 1280, WindowHeight = 1280;
+static int WindowWidth = 1080, WindowHeight = 1440;
 
 static u32 QueueFamilyIndex = -1;
 static VkImage SwapchainImages[MaxSwapchainImageCount];
@@ -44,6 +46,7 @@ enum {
 	BUFFER_IDX_UNIFORM,
 	BUFFER_IDX_POSITION,
 	BUFFER_IDX_ANGLE,
+	BUFFER_IDX_DENSITY_FIELD,
 	BUFFER_IDX_COUNT
 };
 
@@ -112,7 +115,7 @@ static inline s32 S32_Clamp(s32 A, s32 Min, s32 Max) {
 	return S32_Min(S32_Max(A, Min), Max);
 }
 
-static vulkan_arena<3> GPULocalArena;
+static vulkan_arena<4> GPULocalArena;
 static vulkan_arena<1> GPUVisibleArena;
 
 static void UpdateDescriptorSets() {
@@ -157,11 +160,21 @@ static void UpdateDescriptorSets() {
 	AngleBufferUpdate.descriptorCount = 1;
 	AngleBufferUpdate.pBufferInfo = &BufferHandles[BUFFER_IDX_ANGLE];
 
+	VkWriteDescriptorSet DensityFieldBufferUpdate = {};
+	DensityFieldBufferUpdate.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	DensityFieldBufferUpdate.dstSet = DescriptorSet;
+	DensityFieldBufferUpdate.dstBinding = 4;
+	DensityFieldBufferUpdate.dstArrayElement = 0;
+	DensityFieldBufferUpdate.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	DensityFieldBufferUpdate.descriptorCount = 1;
+	DensityFieldBufferUpdate.pBufferInfo = &BufferHandles[BUFFER_IDX_DENSITY_FIELD];
+
 	VkWriteDescriptorSet DescriptorWrites[] = {
 		ImageUpdate,
 		UniformBufferUpdate,
 		PositionBufferUpdate,
 		AngleBufferUpdate,
+		DensityFieldBufferUpdate,
 	};
 	vkUpdateDescriptorSets(Device, ArrayLen(DescriptorWrites), DescriptorWrites, 0, NULL);
 }
@@ -188,11 +201,20 @@ static void CreateSwapchain() {
 	vkGetPhysicalDeviceMemoryProperties(PhysicalDevice, &DeviceProperties);
 
 	GPULocalArena.Destroy(Device);
-	vulkan_arena_builder<3> ArenaBuilder = StartBuildingMemoryArena<3>(Device);
-	BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-	BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-	OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
-	GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
+	{
+		auto ArenaBuilder = StartBuildingMemoryArena<4>(Device);
+		BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+		BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+
+		constexpr u32 Downscale = DENSITY_BUFFER_DOWNSCALE;
+		u32 Width = RoundUpPowerOf2((u32)WindowWidth, Downscale) / Downscale;
+		u32 Height = RoundUpPowerOf2((u32)WindowHeight, Downscale) / Downscale;
+		u64 DensityBufferSize = sizeof(u32) * Width * Height;
+		BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer = ArenaBuilder.PushBuffer(DensityBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+
+		OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+		GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
+	}
 
 	if (OutputImageView) {
 		vkDestroyImageView(Device, OutputImageView, NULL);
@@ -372,12 +394,19 @@ s32 main() {
 				.descriptorCount = 1,
 				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 			};
+			VkDescriptorSetLayoutBinding DensityFieldBinding = {
+				.binding = 4,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.descriptorCount = 1,
+				.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+			};
 
 			VkDescriptorSetLayoutBinding Bindings[] = {
 				ImageBinding,
 				UniformBufferBinding,
 				PositionBinding,
-				AngleBinding
+				AngleBinding,
+				DensityFieldBinding
 			};
 
 			bool Succeeded = true;
@@ -401,7 +430,7 @@ s32 main() {
 				},
 				{
 					.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-					.descriptorCount = 2
+					.descriptorCount = 3
 				},
 			};
 			VkDescriptorPoolCreateInfo PoolInfo = {};
@@ -456,7 +485,7 @@ s32 main() {
 				GPUVisibleArena.Destroy(Device);
 			});
 
-			for (u32 i = 0; i < ArrayLen(BufferHandles); ++i) {
+			for (u32 i = 0; i < BUFFER_IDX_COUNT; ++i) {
 				BufferHandles[i].offset = 0;
 				BufferHandles[i].range = VK_WHOLE_SIZE;
 			}
@@ -536,8 +565,8 @@ s32 main() {
 			vkResetCommandBuffer(CommandBuffer, 0);
 			VulkanBeginCommands(CommandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 
-			constexpr cmd_image_transition ComputeTransition =
-				{ VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_MEMORY_WRITE_BIT };
+			constexpr cmd_image_transition ComputeRWTransition =
+				{ VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT };
 			constexpr cmd_image_transition TransferSrcTransition =
 				{ VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT };
 			constexpr cmd_image_transition TransferDstTransition =
@@ -545,7 +574,7 @@ s32 main() {
 			constexpr cmd_image_transition PresentTransition =
 				{ VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0 };
 
-			CmdTransitionImageLayout(CommandBuffer, OutputImage, TransferSrcTransition, ComputeTransition);
+			CmdTransitionImageLayout(CommandBuffer, OutputImage, TransferSrcTransition, ComputeRWTransition);
 
 			vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, PipelineLayout, 0, 1, &DescriptorSet, 0, NULL);
 
@@ -553,38 +582,54 @@ s32 main() {
 			// vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
 
 			if (ResetParticleState) {
-				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ResetComputePipeline);
-				vkCmdDispatch(CommandBuffer, (ParticleCount + 63) / 64, 1, 1);
-
 				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ClearComputePipeline);
 				vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
+
+				VkBufferMemoryBarrier DensityFieldBarrier = {
+					.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+					.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+					.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+					.buffer = BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer,
+					.offset = 0,
+					.size = VK_WHOLE_SIZE
+				};
+				vkCmdPipelineBarrier(CommandBuffer,
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					0, 0, NULL, 1, &DensityFieldBarrier, 0, NULL
+				);
+
+				vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ResetComputePipeline);
+				vkCmdDispatch(CommandBuffer, (ParticleCount + 127) / 128, 1, 1);
 
 				VkBuffer Buffers[] = {
 					BufferHandles[BUFFER_IDX_POSITION].buffer,
 					BufferHandles[BUFFER_IDX_ANGLE].buffer,
+					BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer,
 				};
-				VkMemoryBarrier Barriers[ArrayLen(Buffers)] = {};
+				VkBufferMemoryBarrier Barriers[ArrayLen(Buffers)] = {};
 				for (u32 i = 0; i < ArrayLen(Barriers); ++i) {
-					Barriers[i].sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					Barriers[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
 					Barriers[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-					Barriers[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+					Barriers[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+					Barriers[i].buffer = Buffers[i];
+					Barriers[i].offset = 0;
+					Barriers[i].size = VK_WHOLE_SIZE;
 				}
 				vkCmdPipelineBarrier(CommandBuffer,
 					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-					0, ArrayLen(Barriers), (const VkMemoryBarrier *)&Barriers, 0, NULL, 0, NULL
+					0, 0, NULL, ArrayLen(Buffers), Barriers, 0, NULL
 				);
-				CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeTransition, ComputeTransition);
+				CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeRWTransition, ComputeRWTransition);
 				ResetParticleState = false;
 			}
 
-			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, SimulateComputePipeline);
-			vkCmdDispatch(CommandBuffer, (ParticleCount + 63) / 64, 1, 1);
-
-			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeTransition, ComputeTransition);
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, FadeComputePipeline);
 			vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
+			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeRWTransition, ComputeRWTransition);
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, SimulateComputePipeline);
+			vkCmdDispatch(CommandBuffer, (ParticleCount + 127) / 128, 1, 1);
 
-			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeTransition, TransferSrcTransition);
+			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeRWTransition, TransferSrcTransition);
 			CmdTransitionImageLayout(CommandBuffer, SwapchainImages[ImageIndex], PresentTransition, TransferDstTransition);
 			v2i Resolution = { WindowWidth, WindowHeight };
 			CmdBlit2DImage(CommandBuffer, OutputImage, SwapchainImages[ImageIndex], Resolution, Resolution);

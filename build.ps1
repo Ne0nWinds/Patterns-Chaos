@@ -24,7 +24,11 @@ if ($shaders) {
 
 	foreach ($CMD in $commands) {
 		Write-Host $CMD -ForegroundColor Yellow
-		Invoke-Expression $CMD
+		if ($debug) {
+			Invoke-Expression "$CMD -g"
+		} else {
+			Invoke-Expression $CMD
+		}
 		if ($LASTEXITCODE -eq 0) {
 			Write-Host "Shader compilation successful!" -ForegroundColor Green
 		} else {
