@@ -1,15 +1,14 @@
 
-#extension GL_EXT_shader_16bit_storage : require
-
 #define PI 3.14159265358979323846
 #define TWO_PI 6.28318530717958647692
-
 
 layout(set = 0, binding = 0, rgba8) uniform image2D OutputImage;
 layout(set = 0, binding = 1) uniform BoundUniforms {
 	ivec2 ImageSize;
 	uint ParticleCount;
 	uint FrameNumber;
+	uint DensityBufferSize;
+	uint DensityBufferWidth;
 };
 layout(set = 0, binding = 2, std430) buffer PositionBuffer {
 	vec2 Positions[];

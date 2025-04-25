@@ -28,7 +28,9 @@ static VkPipeline Pipeline;
 static VkSurfaceKHR Surface;
 static VkSwapchainKHR Swapchain = 0;
 static GLFWwindow *Window = 0;
-static int WindowWidth = 1080, WindowHeight = 1440;
+static int WindowWidth = 1080, WindowHeight = 1080;
+static u32 DensityBufferSize = 0;
+static u32 DensityBufferWidth = 0;
 
 static u32 QueueFamilyIndex = -1;
 static VkImage SwapchainImages[MaxSwapchainImageCount];
@@ -56,12 +58,15 @@ struct uniform_data {
 	v2i ImageSize;
 	u32 ParticleCount;
 	u32 FrameNumber;
+	u32 DensityBufferSize;
+	u32 DensityBufferWidth;
 };
 
 static VkPipeline ClearComputePipeline;
 static VkPipeline ResetComputePipeline;
 static VkPipeline FadeComputePipeline;
 static VkPipeline SimulateComputePipeline;
+static VkPipeline RenderDensityBufferComputePipeline;
 
 static VkDescriptorPool DescriptorPool;
 
@@ -76,6 +81,10 @@ static u32 ClearComputeShader[] =
 ;
 static u32 SimulateComputeShader[] =
 	#include "simulate.compute.h"
+;
+
+static u32 RenderDensityBufferComputeShader[] =
+	#include "render_density_buffer.compute.h"
 ;
 
 #define OnExitPush(...) {\
@@ -203,14 +212,15 @@ static void CreateSwapchain() {
 	GPULocalArena.Destroy(Device);
 	{
 		auto ArenaBuilder = StartBuildingMemoryArena<4>(Device);
-		BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
-		BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+		BufferHandles[BUFFER_IDX_POSITION].buffer = ArenaBuilder.PushBuffer(sizeof(v2) * MaxParticleCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+		BufferHandles[BUFFER_IDX_ANGLE].buffer = ArenaBuilder.PushBuffer(sizeof(f32) * MaxParticleCount, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
 
 		constexpr u32 Downscale = DENSITY_BUFFER_DOWNSCALE;
-		u32 Width = RoundUpPowerOf2((u32)WindowWidth, Downscale) / Downscale;
-		u32 Height = RoundUpPowerOf2((u32)WindowHeight, Downscale) / Downscale;
-		u64 DensityBufferSize = sizeof(u32) * Width * Height;
-		BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer = ArenaBuilder.PushBuffer(DensityBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+		u32 Width = (WindowWidth + Downscale - 1) / Downscale;
+		u32 Height = (WindowHeight + Downscale - 1) / Downscale;
+		DensityBufferSize = sizeof(u32) * Width * Height;
+		DensityBufferWidth = Width;
+		BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer = ArenaBuilder.PushBuffer(DensityBufferSize * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
 
 		OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 		GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
@@ -461,11 +471,13 @@ s32 main() {
 			ClearComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(ClearComputeShader), PipelineLayout);
 			FadeComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(FadeComputeShader), PipelineLayout);
 			SimulateComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(SimulateComputeShader), PipelineLayout);
+			RenderDensityBufferComputePipeline = VulkanCreateComputeShaderPipeline(CreateRange(RenderDensityBufferComputeShader), PipelineLayout);
 			OnExitPush({
 				vkDestroyPipeline(Device, ResetComputePipeline, NULL);
 				vkDestroyPipeline(Device, ClearComputePipeline, NULL);
 				vkDestroyPipeline(Device, FadeComputePipeline, NULL);
 				vkDestroyPipeline(Device, SimulateComputePipeline, NULL);
+				vkDestroyPipeline(Device, RenderDensityBufferComputePipeline, NULL);
 			});
 
 			RuntimeAssert(Succeeded);
@@ -532,9 +544,9 @@ s32 main() {
 	u32 ImageIndex = 0;
 
 	while (!glfwWindowShouldClose(Window)) {
-		glfwPollEvents();
 
 		RuntimeAssert(vkWaitForFences(Device, 1, InFlightFences + CurrentFrame, VK_TRUE, UINT64_MAX) == VK_SUCCESS);
+		glfwPollEvents();
 
 		VkResult AcquireImageResult = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX, ImageAvailableSemaphores[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
 
@@ -557,6 +569,8 @@ s32 main() {
 			UniformData->ImageSize.Y = WindowHeight;
 			UniformData->ParticleCount = ParticleCount;
 			UniformData->FrameNumber = FrameNumber;
+			UniformData->DensityBufferSize = DensityBufferSize;
+			UniformData->DensityBufferWidth = DensityBufferWidth;
 			vkUnmapMemory(Device, GPUVisibleArena.Memory);
 		}
 
@@ -626,8 +640,22 @@ s32 main() {
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, FadeComputePipeline);
 			vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
 			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeRWTransition, ComputeRWTransition);
+			CmdBufferMemoryBarrier(CommandBuffer, BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer,
+				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT },
+				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT }
+			);
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, SimulateComputePipeline);
 			vkCmdDispatch(CommandBuffer, (ParticleCount + 127) / 128, 1, 1);
+			CmdBufferMemoryBarrier(CommandBuffer, BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer,
+				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT },
+				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT }
+			);
+			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, RenderDensityBufferComputePipeline);
+			vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
+			CmdBufferMemoryBarrier(CommandBuffer, BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer,
+				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT },
+				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT }
+			);
 
 			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeRWTransition, TransferSrcTransition);
 			CmdTransitionImageLayout(CommandBuffer, SwapchainImages[ImageIndex], PresentTransition, TransferDstTransition);

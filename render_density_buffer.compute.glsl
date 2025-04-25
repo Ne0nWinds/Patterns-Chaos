@@ -11,13 +11,11 @@ void main() {
 		return;
 	}
 
-	vec4 value = imageLoad(OutputImage, texel);
-	value.xyz *= 0.9125;
-	value.xyz *= step(0.125, value.xyz);
-
 	ivec2 position = ivec2(texel / DENSITY_BUFFER_DOWNSCALE);
 	uint index = position.y * DensityBufferWidth + position.x;
-	DensityField[index] = 0;
+	uint particle_count = DensityField[index];
 
-	imageStore(OutputImage, texel, value);
+	vec4 color = imageLoad(OutputImage, flip_y(texel));
+	color.r = float(particle_count) / 4.0;
+	imageStore(OutputImage, flip_y(texel), color);
 }

@@ -20,6 +20,7 @@ if ($shaders) {
 		"glslc -mfmt=c -fshader-stage=compute .\reset.compute.glsl -o reset.compute.h",
 		"glslc -mfmt=c -fshader-stage=compute .\fade.compute.glsl -o fade.compute.h",
 		"glslc -mfmt=c -fshader-stage=compute .\simulate.compute.glsl -o simulate.compute.h"
+		"glslc -mfmt=c -fshader-stage=compute .\render_density_buffer.compute.glsl -o render_density_buffer.compute.h"
 	)
 
 	foreach ($CMD in $commands) {
@@ -27,7 +28,7 @@ if ($shaders) {
 		if ($debug) {
 			Invoke-Expression "$CMD -g"
 		} else {
-			Invoke-Expression $CMD
+			Invoke-Expression "$CMD -O"
 		}
 		if ($LASTEXITCODE -eq 0) {
 			Write-Host "Shader compilation successful!" -ForegroundColor Green

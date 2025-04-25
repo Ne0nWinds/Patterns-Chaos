@@ -7,7 +7,7 @@ layout(local_size_x = 128) in;
 void main() {
 	uint idx = gl_GlobalInvocationID.x;
 
-	if (idx.x >= ParticleCount) {
+	if (idx >= ParticleCount) {
 		return;
 	}
 
@@ -17,7 +17,6 @@ void main() {
 	Positions[idx] = position;
 	Angles[idx] = random(random_seed) * TWO_PI;
 
-	uint width = (ImageSize.x + DENSITY_BUFFER_DOWNSCALE - 1) / DENSITY_BUFFER_DOWNSCALE;
 	ivec2 index = ivec2(position / DENSITY_BUFFER_DOWNSCALE);
-	atomicAdd(DensityField[index.y * width + index.x], 1u);
+	atomicAdd(DensityField[index.y * DensityBufferWidth + index.x], 1u);
 }

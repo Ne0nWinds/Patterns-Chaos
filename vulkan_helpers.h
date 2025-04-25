@@ -135,6 +135,22 @@ static inline void CmdTransitionImageLayout(VkCommandBuffer CommandBuffer, VkIma
     vkCmdPipelineBarrier(CommandBuffer, Src.PipelineStage, Dst.PipelineStage, 0, 0, NULL, 0, NULL, 1, &Barrier);
 }
 
+struct cmd_buffer_memory_barrier {
+	VkPipelineStageFlags PipelineStage;
+	VkAccessFlags AccessFlags;
+};
+static inline void CmdBufferMemoryBarrier(VkCommandBuffer CommandBuffer, VkBuffer Buffer, const cmd_buffer_memory_barrier &Src, const cmd_buffer_memory_barrier &Dst, VkDeviceSize Offset = 0, VkDeviceSize Size = VK_WHOLE_SIZE) {
+	VkBufferMemoryBarrier Barrier = {};
+	Barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	Barrier.srcAccessMask = Src.AccessFlags;
+	Barrier.dstAccessMask = Dst.AccessFlags;
+	Barrier.buffer = Buffer;
+	Barrier.offset = Offset;
+	Barrier.size = Size;
+
+	vkCmdPipelineBarrier(CommandBuffer, Src.PipelineStage, Dst.PipelineStage, 0, 0, NULL, 1, &Barrier, 0, NULL);
+}
+
 static void CmdBlit2DImage(VkCommandBuffer CommandBuffer, VkImage SrcImage, VkImage DstImage, const v2i &SrcResolution, const v2i &DstResolution, VkFilter Filter = VK_FILTER_NEAREST) {
     VkImageBlit BlitRegion = {};
 
