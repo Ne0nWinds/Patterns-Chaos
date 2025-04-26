@@ -12,12 +12,14 @@ void main() {
 	}
 
 	vec4 value = imageLoad(OutputImage, texel);
-	value.xyz *= 0.9125;
-	value.xyz *= step(0.125, value.xyz);
+	value.x *= 0.9525;
+	value.x *= step(0.125, value.x);
+	value.y = 0.0;
 
+	uint clear_offset = bool(FrameNumber & 0x1) ? DensityBufferLength : 0;
 	ivec2 position = ivec2(texel / DENSITY_BUFFER_DOWNSCALE);
 	uint index = position.y * DensityBufferWidth + position.x;
-	DensityField[index] = 0;
+	DensityField[clear_offset + index] = 0;
 
 	imageStore(OutputImage, texel, value);
 }

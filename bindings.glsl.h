@@ -7,8 +7,9 @@ layout(set = 0, binding = 1) uniform BoundUniforms {
 	ivec2 ImageSize;
 	uint ParticleCount;
 	uint FrameNumber;
-	uint DensityBufferSize;
+	uint DensityBufferLength;
 	uint DensityBufferWidth;
+	uint DensityBufferHeight;
 };
 layout(set = 0, binding = 2, std430) buffer PositionBuffer {
 	vec2 Positions[];

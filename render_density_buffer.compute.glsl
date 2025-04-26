@@ -11,9 +11,11 @@ void main() {
 		return;
 	}
 
+	uint read_offset = bool(FrameNumber & 0x1) ? DensityBufferLength : 0;
+
 	ivec2 position = ivec2(texel / DENSITY_BUFFER_DOWNSCALE);
 	uint index = position.y * DensityBufferWidth + position.x;
-	uint particle_count = DensityField[index];
+	uint particle_count = DensityField[read_offset + index];
 
 	vec4 color = imageLoad(OutputImage, flip_y(texel));
 	color.r = float(particle_count) / 4.0;

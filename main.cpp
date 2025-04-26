@@ -29,8 +29,9 @@ static VkSurfaceKHR Surface;
 static VkSwapchainKHR Swapchain = 0;
 static GLFWwindow *Window = 0;
 static int WindowWidth = 1080, WindowHeight = 1080;
-static u32 DensityBufferSize = 0;
+static u32 DensityBufferLength = 0;
 static u32 DensityBufferWidth = 0;
+static u32 DensityBufferHeight = 0;
 
 static u32 QueueFamilyIndex = -1;
 static VkImage SwapchainImages[MaxSwapchainImageCount];
@@ -58,8 +59,9 @@ struct uniform_data {
 	v2i ImageSize;
 	u32 ParticleCount;
 	u32 FrameNumber;
-	u32 DensityBufferSize;
+	u32 DensityBufferLength;
 	u32 DensityBufferWidth;
+	u32 DensityBufferHeight;
 };
 
 static VkPipeline ClearComputePipeline;
@@ -218,9 +220,10 @@ static void CreateSwapchain() {
 		constexpr u32 Downscale = DENSITY_BUFFER_DOWNSCALE;
 		u32 Width = (WindowWidth + Downscale - 1) / Downscale;
 		u32 Height = (WindowHeight + Downscale - 1) / Downscale;
-		DensityBufferSize = sizeof(u32) * Width * Height;
+		DensityBufferLength = Width * Height;
 		DensityBufferWidth = Width;
-		BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer = ArenaBuilder.PushBuffer(DensityBufferSize * 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
+		DensityBufferHeight = Height;
+		BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer = ArenaBuilder.PushBuffer(2 * sizeof(u32) * DensityBufferLength, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_SHARING_MODE_EXCLUSIVE);
 
 		OutputImage = ArenaBuilder.Push2DImage({ WindowWidth, WindowHeight }, ImageFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 		GPULocalArena = ArenaBuilder.CommitAndAllocateArena(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DeviceProperties);
@@ -569,8 +572,9 @@ s32 main() {
 			UniformData->ImageSize.Y = WindowHeight;
 			UniformData->ParticleCount = ParticleCount;
 			UniformData->FrameNumber = FrameNumber;
-			UniformData->DensityBufferSize = DensityBufferSize;
+			UniformData->DensityBufferLength = DensityBufferLength;
 			UniformData->DensityBufferWidth = DensityBufferWidth;
+			UniformData->DensityBufferHeight = DensityBufferHeight;
 			vkUnmapMemory(Device, GPUVisibleArena.Memory);
 		}
 
@@ -650,12 +654,14 @@ s32 main() {
 				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT },
 				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT }
 			);
+#if 0
 			vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, RenderDensityBufferComputePipeline);
 			vkCmdDispatch(CommandBuffer, (WindowWidth + 15) / 16, (WindowHeight + 15) / 16, 1);
 			CmdBufferMemoryBarrier(CommandBuffer, BufferHandles[BUFFER_IDX_DENSITY_FIELD].buffer,
 				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT },
 				{ VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT }
 			);
+#endif
 
 			CmdTransitionImageLayout(CommandBuffer, OutputImage, ComputeRWTransition, TransferSrcTransition);
 			CmdTransitionImageLayout(CommandBuffer, SwapchainImages[ImageIndex], PresentTransition, TransferDstTransition);
