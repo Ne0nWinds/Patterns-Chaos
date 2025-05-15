@@ -12,7 +12,7 @@ void main() {
 	}
 
 	vec4 value = imageLoad(OutputImage, texel);
-	value.x *= 0.9525;
+	value.x *= 0.9725;
 	value.x *= step(0.125, value.x);
 	value.y = 0.0;
 

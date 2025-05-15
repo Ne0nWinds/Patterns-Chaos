@@ -52,8 +52,8 @@ void main() {
 		}
 	}
 
-	float alpha = deg2rad(5.0);
-	float beta = deg2rad(12.0);
+	float alpha = deg2rad(42.0);
+	float beta = deg2rad(9.0);
 	float count = float(left + right);
 	angle -= alpha + beta * count * sign(right - left);
 	direction = vec2(cos(angle), sin(angle));
@@ -62,7 +62,8 @@ void main() {
 	Positions[idx] = position;
 	Angles[idx] = angle;
 
-	vec4 color = vec4(0.0, 1.0, 0.0, 1.0);
+	vec4 color = vec4(1.0, 0.0, 0.0, 1.0);
+	color = mix(color, vec4(0.0, 1.0, 0.0, 1.0), smoothstep(20, 32, count));
 	imageStore(OutputImage, flip_y(ivec2(position)), color);
 
 	{
